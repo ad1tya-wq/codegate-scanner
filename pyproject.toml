@@ -30,13 +30,19 @@ dependencies = [
     "reportlab>=4.0",
     "pygments>=2.19",
     "jinja2>=3.1",
+    # Not just a research-pipeline dependency: scan/pipeline.py's static
+    # pre-pass (oracles/semgrep_oracle.py::run_semgrep_on_path) shells out
+    # to this on every `codegate scan`. It degrades gracefully (a missing
+    # binary is caught, not a crash) but silently produces zero static
+    # findings without it -- worse than a crash, since nothing tells the
+    # user semgrep coverage is missing. Core, not optional.
+    "semgrep",
 ]
 
 [project.optional-dependencies]
 # Only needed to regenerate the corpus / retrain the model (the offline half).
 research = [
     "matplotlib>=3.9",
-    "semgrep",
     "lightgbm>=4.6",
 ]
 dev = [

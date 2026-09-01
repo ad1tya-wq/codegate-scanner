@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test suite (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # dev + research: the test suite exercises the offline research
+      # pipeline (matplotlib-backed plots, semgrep-backed oracle tests)
+      # as well as the scanner, so both extras are needed to collect and
+      # run every test -- unlike an end user's `pip install -e .`, which
+      # only needs the base dependencies (see the clean-install job below).
+      - name: Install codegate (dev + research extras)
+        run: pip install -e ".[dev,research]"
+
+      - name: Run test suite
+        run: pytest tests/ -q
+
+  clean-install-smoke:
+    name: Clean install smoke test (base dependencies only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      # Deliberately base dependencies only -- no [research], no [dev],
+      # no API keys. This is the project's own documented promise ("fresh
+      # clone works with zero setup") and it has previously broken
+      # silently: cli.py used to import the research pipeline eagerly at
+      # module level, which pulled in matplotlib (a research-only extra)
+      # for every command including `scan`, so a plain `pip install -e .`
+      # crashed before printing anything. Every dev machine already had
+      # the research extras installed, so no local test run ever caught
+      # it -- this job exists specifically so a clean environment does.
+      - name: Install codegate (base dependencies only)
+        run: pip install -e .
+
+      - name: codegate info runs out of the box
+        run: codegate info
+
+      - name: codegate scan runs in every format, no LLM key needed
+        run: |
+          codegate scan examples/vulnerable_app --no-llm --format terminal
+          codegate scan examples/vulnerable_app --no-llm --format json | python -m json.tool > /dev/null
+          codegate scan examples/vulnerable_app --no-llm --format sarif | python -m json.tool > /dev/null
+          codegate scan examples/vulnerable_app --no-llm --format pdf --output /tmp/smoke_report.pdf
+
+      - name: Generated PDF is real and non-trivial
+        run: |
+          test -s /tmp/smoke_report.pdf
+          head -c 5 /tmp/smoke_report.pdf | grep -q '%PDF-'

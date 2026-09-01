@@ -766,6 +766,7 @@ Chronological, including reversals. Each entry: what changed, and why.
 | 7 | `;` command separator in the cmdi payload → **`&`** | Windows `cmd.exe` (dev machine) doesn't accept `;` as a POSIX-style separator; `&` works under both `cmd.exe` and POSIX `sh` |
 | 8 | Both-machines-on-one-LAN Ollama setup (Appendix A) → **host-runs-everything, ships back one file (`docs/OLLAMA_SETUP.md`)** | The two machines involved in Track A do not share Wi-Fi; running the whole generation step locally on the host and shipping `generations.parquet` back removes every networking variable (firewall rules, `OLLAMA_HOST` binding, LAN reachability) at the cost of the host needing Python + the repo, not just Ollama |
 | 9 | Corpus scale: 1,620 samples (3 per prompt) → **540 (1 per prompt)** | Keeps the unattended Track A run to ~2–5h on CPU; scaling up is deferred until the first 540-sample loop proves out end to end |
+| 10 | `cli.py`'s eager `from codegate.research.pipeline import run_full_pipeline` → **lazy-imported inside `calibrate()`**; `semgrep` moved from the `research` optional extra → **core `dependencies`** | Found while setting up CI (§9): `research/pipeline.py` imports `research/eval/plots.py`, which imports `matplotlib` unconditionally — a dependency declared only under `[research]`. Because `cli.py` imported `run_full_pipeline` at module top level, *every* `codegate` command, including `scan`, crashed with `ModuleNotFoundError` on a plain `pip install -e .` (no extras) — directly breaking the project's own "fresh clone works with zero setup" promise and the plan's clean-room acceptance criterion. `semgrep` had the milder version of the same problem: `scan/pipeline.py`'s static pre-pass needs it, but it lived under `research` too, so a base install would silently produce zero static findings with no warning. Verified the fix in a fresh venv: `pip install -e .` (base only) followed by `codegate info` and `codegate scan examples/vulnerable_app --no-llm --format pdf` both now succeed |
 
 ## 5 · Confidence assessment
 
@@ -940,3 +941,56 @@ verified this session).
   freshness check or expiry warning on the price itself, only the
   existing `is_estimate` flag covering the token-count side of the
   estimate.
+- **`data/model/model.joblib` was pickled under scikit-learn 1.7.2;
+  `pyproject.toml` only pins `scikit-learn>=1.7` (no upper bound).**
+  Noticed as an `InconsistentVersionWarning` while verifying the CI fix
+  in a fresh venv, which happened to resolve scikit-learn 1.9.0. Not
+  fixed this session — scikit-learn's own pickle compatibility is a
+  judgment call (pin tightly and accept staleness vs. leave open and
+  accept a future silent-behavior-change risk) that deserves its own
+  decision, not a reflexive pin change buried in a CI-setup session.
+- **`lightgbm` is declared under the `research` extra but never imported
+  anywhere in `src/`.** Found while checking what the CI test job
+  actually needs to install. Harmless (extra install weight only,
+  ~seconds in CI) but dead weight; left as-is since removing a
+  dependency someone may be about to use for upcoming ranker work is a
+  bigger call than this session's scope.
+
+## 9 · Continuous integration
+
+`.github/workflows/ci.yml`, two jobs, both on `ubuntu-latest`, triggered
+on every push/PR to `main` plus manual dispatch:
+
+1. **`test`** — the full suite, matrixed across Python 3.11 and 3.13
+   (the range `pyproject.toml`'s `requires-python = ">=3.11"` promises,
+   never actually verified until this job existed). Installs
+   `pip install -e ".[dev,research]"` — the test suite exercises both
+   the scanner and the offline research pipeline (matplotlib-backed
+   plots, semgrep-backed oracle tests), so both extras are needed just
+   to collect every test.
+2. **`clean-install-smoke`** — installs `pip install -e .` with **no**
+   extras and **no** API keys, then runs `codegate info` and
+   `codegate scan examples/vulnerable_app --no-llm` across all four
+   `--format` values, asserting the PDF is a real, non-empty `%PDF-`
+   file. This job exists specifically because it is the job that
+   would have caught decision #10 above (§4) — the eager-matplotlib-
+   import bug that broke every `codegate` command on a plain install.
+   No local test run ever caught it because every dev machine already
+   had the `research` extra installed; a clean CI environment is what
+   actually exercises the "fresh clone works with zero setup" promise
+   this project has repeated since Phase 0.
+
+**Verified for real, not just YAML-linted:** pushed to `main` and
+watched the actual run on GitHub's runners (`gh run watch`) rather than
+trusting the workflow file would behave as written — both jobs green,
+`test` at Python 3.11 and 3.13 (4/4 matrix+job combinations), including
+picking up the packaging fix that made `clean-install-smoke` pass at all.
+
+**Not yet in CI, on purpose:** no lint/format check (the project has
+never adopted one — adding `ruff`/`black` now would be a new tooling
+decision, not a CI-plumbing one), no Windows runner (the actual dev
+machine is Windows, but `ubuntu-latest` is faster and cheaper and
+nothing in the test suite is Windows-specific *except* the cmdi payload
+separator already handled per-OS in the oracle itself — see decision
+#7), and no coverage gate (no coverage baseline has been established to
+gate against yet).

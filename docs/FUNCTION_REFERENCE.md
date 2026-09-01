@@ -791,7 +791,12 @@ works with zero setup") or `OllamaBackend`s (`--real`, mirroring
 `scripts/run_real.py`'s backend wiring), then calls
 `run_full_pipeline`. Prints the resulting vulnerable rate, `t_hat`, and
 coverage, and confirms where `model.joblib`/`calibration.json` were
-written.
+written. **`run_full_pipeline` is imported inside this function, not at
+module top** (CI fix, see `docs/ENGINEERING_LOG.md` decision #10) --
+it transitively imports `matplotlib` via `research/eval/plots.py`,
+which lives only in the optional `research` extra. Importing it eagerly
+at module level meant *every* `codegate` command needed `matplotlib`
+installed, `scan` included, breaking a plain `pip install -e .`.
 **Talks to:** Calls `load_config`, `load_prompt_bank`, `SimulatedBackend`/
 `OllamaBackend`, `run_full_pipeline` (which internally calls
 `save_model`/`save_calibration`). This is what produced the
@@ -1399,6 +1404,13 @@ for what building it caught (a real `Paragraph`-escaping bug in
 fix each, for CWE-89/78/798 respectively), `report_utils.py` (entirely
 safe), `app.py` (ties them together), `README.md`. A generated
 `sample_report.pdf` is committed alongside.
+
+## `.github/workflows/ci.yml` — continuous integration
+
+Not library code (no functions), so no per-function entries -- see
+`docs/ENGINEERING_LOG.md` section 9 for the two jobs (`test`,
+`clean-install-smoke`) and what the smoke job specifically guards
+against (the eager-`matplotlib`-import bug, decision #10).
 
 ## Status
 

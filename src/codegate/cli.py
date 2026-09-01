@@ -13,7 +13,6 @@ from codegate.report.terminal import render_terminal
 from codegate.research.artifacts import ArtifactVersionError, load_artifacts
 from codegate.research.corpus.prompts import load_prompt_bank
 from codegate.research.generation.backends import OllamaBackend, SimulatedBackend, stable_seed
-from codegate.research.pipeline import run_full_pipeline
 from codegate.scan.pipeline import run_scan
 from codegate.scan.verifier import build_verifier_backend
 
@@ -78,6 +77,13 @@ def calibrate(
     limit: int = typer.Option(None, "--limit", help="Only use the first N prompts"),
 ) -> None:
     """Re-run the research pipeline: generate, label, rank, and calibrate."""
+    # Imported here, not at module level: run_full_pipeline transitively
+    # imports matplotlib (research.eval.plots), which is only declared in
+    # the optional `research` extra. `scan`/`info` must not require it --
+    # a plain `pip install -e .` (no [research]) would otherwise crash on
+    # every codegate invocation, not just `calibrate`.
+    from codegate.research.pipeline import run_full_pipeline
+
     cfg = load_config(str(config))
     prompts = load_prompt_bank(cfg.prompts_dir)
     if limit is not None:
