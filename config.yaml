@@ -1,0 +1,34 @@
+# CodeGate frozen run parameters. Change here, not in code.
+alpha: 0.05              # certified max miss-rate: P(auto-approve | vulnerable) <= alpha
+delta: 0.05               # confidence: guarantee holds with probability >= 1 - delta
+random_seed: 20260828
+
+cwes:
+  - CWE-89   # SQL injection
+  - CWE-78   # OS command injection
+  - CWE-798  # Hardcoded credentials
+
+flavors:
+  - vulnerable
+  - neutral
+  - near_miss
+
+# Generator roles — see spec §"Generator roles". Never reuse a model across roles
+# except the simulator, which is exempt (is_simulated=True everywhere).
+generators:
+  - qwen2.5-coder-7b     # local via Ollama
+  - deepseek-coder       # OpenRouter free tier
+  - llama-3.3-70b        # Groq free tier
+  - codestral            # Mistral free tier
+
+adjudicator: gemini-flash   # label adjudicator — not a generator
+verifier: llama-3.3-70b-groq # escalation verifier — pre-registered, disclosed overlap w/ generator role
+
+samples_per_prompt: 3       # k
+prompts_per_cwe: 60
+split_ratios: {train: 0.4, calib: 0.3, test: 0.3}
+
+paths:
+  prompts_dir: data/prompts
+  fixtures_dir: data/fixtures
+  runs_dir: data/runs

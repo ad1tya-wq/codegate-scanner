@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codegate"
+version = "0.2.0"
+description = "Certified-miss-rate security scanner for Python — escalates to an LLM only what it cannot prove is safe"
+requires-python = ">=3.11"
+readme = "README.md"
+authors = [
+    { name = "Linga Nikhil Arya" },
+    { name = "Aditya Sahu" },
+    { name = "Peter Isaac" },
+]
+keywords = ["security", "sast", "conformal-prediction", "llm", "static-analysis"]
+
+dependencies = [
+    "pandas>=2.3",
+    "pyarrow>=21.0",
+    "numpy>=2.2",
+    "scipy>=1.16",
+    "scikit-learn>=1.7",
+    "joblib>=1.5",
+    "PyYAML>=6.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "requests>=2.32",
+    "python-dotenv>=1.2",
+    "reportlab>=4.0",
+    "pygments>=2.19",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+# Only needed to regenerate the corpus / retrain the model (the offline half).
+research = [
+    "matplotlib>=3.9",
+    "semgrep",
+    "lightgbm>=4.6",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+codegate = "codegate.cli:app"
+
+[project.urls]
+Repository = "https://github.com/ad1tya-wq/codegate-scanner"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+codegate = ["py.typed"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
