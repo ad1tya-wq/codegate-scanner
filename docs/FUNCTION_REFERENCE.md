@@ -627,13 +627,16 @@ unset/empty — for settings that have a sensible default (e.g.
 
 #### `require_env(name) -> str`
 **Does:** Same as `get_env`, but raises a `RuntimeError` with an
-actionable message (pointing at `.env.example` / setup docs) instead of
-returning a default, for settings with no safe fallback (API keys).
-**Talks to:** Not currently called on the all-Ollama path (no keys
-required); will be used by Phase 6's verifier when a key-requiring backend
-is selected.
+actionable message (pointing at `.env` and `README.md`'s Quickstart)
+instead of returning a default, for settings with no safe fallback.
+**Talks to:** Not currently called anywhere in `src/` — the one place
+that could plausibly need it, `scan/verifier.py::build_verifier_backend`
+(Phase 6), deliberately uses `get_env` instead: a missing
+`GROQ_API_KEY` must degrade to "skip LLM verification," not raise,
+since the scanner has to keep working without a key.
 **Tech:** stdlib `os`.
-**Fits in:** Both halves — the hard-failure path for missing secrets.
+**Fits in:** Both halves — available for any future setting that
+genuinely has no safe fallback, unlike the Groq key.
 
 ### `schemas.py`
 

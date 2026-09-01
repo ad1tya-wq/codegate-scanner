@@ -38,7 +38,7 @@ def require_env(name: str) -> str:
     if not value:
         raise RuntimeError(
             f"Missing required environment variable '{name}'. "
-            f"Copy .env.example to .env at the repo root and fill it in -- "
-            f"see NEEDS_FROM_YOU.md section 1 for where to get each key."
+            f"Add a line '{name}=...' to .env at the repo root -- "
+            f"see README.md's Quickstart section for where to get a key."
         )
     return value
