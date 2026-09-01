@@ -19,11 +19,40 @@ back **one file**.
 
 ## Contents
 
+- [Connectivity options — why this guide works the way it does](#connectivity-options--why-this-guide-works-the-way-it-does)
 - [Part A — Install](#part-a--install) (4 things to install)
 - [Part B — Setup](#part-b--setup) (configure and test)
 - [Part C — Run](#part-c--run)
 - [Part D — Send the results back](#part-d--send-the-results-back)
 - [Troubleshooting](#troubleshooting)
+
+## Connectivity options — why this guide works the way it does
+
+There are four ways to connect a generator machine to an Ollama model
+host. This guide implements **option 3** because the two machines
+involved right now don't share Wi-Fi. If your setup changes later, here's
+the full picture, in the order we'd recommend trying them:
+
+| # | Option | Needs | Verdict |
+|---|---|---|---|
+| 1 | **Same Wi-Fi / router** | Both machines on one LAN | Simplest when it's available. Fails outright on campus/guest networks with client isolation (most block device-to-device traffic even on the same SSID) — which is the reason this guide doesn't use it. |
+| 2 | **Tailscale** (free mesh VPN) | ~5 min install on both machines | Recommended when the networks genuinely differ. Works across any two networks, including behind NAT, with no port-forwarding and no firewall rule to open — each machine gets a stable `100.x.x.x` address; set `OLLAMA_BASE_URL=http://100.x.x.x:11434`. Strictly safer than option 1's open port, since traffic is encrypted and only reaches devices on your own Tailscale network. |
+| 3 | **✅ This guide: generate entirely on the host, ship the data back** | Python + this repo on the host, no networking at all | Zero-networking, and the most robust of the four — nothing to misconfigure, nothing for a firewall to block, no LAN dependency. The cost: the host needs a Python setup, not just Ollama (Part A below). This is what the rest of this document does. |
+| 4 | **Phone hotspot** | Both machines join one hotspot | Quick unblock for a short run — collapses to option 1 once both machines are on the same hotspot network. Worth trying if 1–3 aren't workable and the run is small. |
+
+**Explicitly not recommended:** exposing Ollama's port via `ngrok`,
+`cloudflared`, or a router port-forward. Ollama's API has no
+authentication — doing this puts an open, unauthenticated LLM server on
+the public internet for as long as the tunnel is up.
+
+If you're reading this because your situation now *does* allow options 1,
+2, or 4: the rest of this guide (generate-locally-and-send-a-file) still
+works and is still the simplest to reason about, but you could instead
+point `OLLAMA_BASE_URL` at the other machine's address and skip straight
+to running the full pipeline (not `--generate-only`) on the machine with
+the repo. That's a different, more involved setup than this guide covers
+— ask before switching to it, since it also means generated code gets
+*executed* wherever the full pipeline runs (see the safety note above).
 
 ## What you need
 
