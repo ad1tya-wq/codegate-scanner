@@ -110,14 +110,14 @@ def _cover_flowables(styles, result: ScanResult, target: Path, verifier_model: s
         Spacer(1, 1.5 * inch),
         Paragraph("CodeGate Security Scan Report", styles["Title"]),
         Spacer(1, 0.3 * inch),
-        Paragraph(f"Target: {target}", styles["Body"]),
+        Paragraph(f"Target: {escape(str(target))}", styles["Body"]),
         Paragraph(f"Scanned: {datetime.now(timezone.utc).isoformat()}", styles["Body"]),
         Paragraph(f"CodeGate version: {__version__}", styles["Body"]),
     ]
     if calib is not None:
         flow.append(Paragraph(
-            f"Ranker: {calib.ranker_id}  |  Corpus: {calib.corpus_version}  |  "
-            f"Verifier: {verifier_model or 'not used'}", styles["Body"]
+            f"Ranker: {escape(calib.ranker_id)}  |  Corpus: {escape(calib.corpus_version)}  |  "
+            f"Verifier: {escape(verifier_model) if verifier_model else 'not used'}", styles["Body"]
         ))
     flow.append(Paragraph(
         f"{len(result.findings)} finding(s) across {result.n_units} scanned function(s), "
@@ -127,7 +127,7 @@ def _cover_flowables(styles, result: ScanResult, target: Path, verifier_model: s
         flow.append(Spacer(1, 0.3 * inch))
         flow.append(Paragraph(
             "PROVISIONAL CERTIFICATE -- this scan's model was calibrated on "
-            f"'{calib.corpus_version}', not a real corpus. Coverage and "
+            f"'{escape(calib.corpus_version)}', not a real corpus. Coverage and "
             "miss-rate numbers below are not yet meaningful. See "
             "docs/ENGINEERING_LOG.md.", styles["Banner"],
         ))
@@ -225,10 +225,10 @@ def _findings_flowables(styles, result: ScanResult) -> list:
 
     for f in result.findings:
         rem = get_remediation(f.cwe)
-        flow.append(Paragraph(f"{f.file}:{f.line} -- {f.func_name}()", styles["Heading2"]))
+        flow.append(Paragraph(f"{escape(str(f.file))}:{f.line} -- {escape(f.func_name)}()", styles["Heading2"]))
         flow.append(Paragraph(
-            f"<b>{f.cwe}</b> ({rem.title}) -- severity {f.severity}, source {f.source}, "
-            f"confidence {f.confidence:.2f}", styles["Body"],
+            f"<b>{escape(f.cwe)}</b> ({escape(rem.title)}) -- severity {escape(f.severity)}, "
+            f"source {escape(f.source)}, confidence {f.confidence:.2f}", styles["Body"],
         ))
         flow.append(Paragraph(escape(f.message), styles["Body"]))
 

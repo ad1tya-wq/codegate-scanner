@@ -31,10 +31,10 @@ Four status labels are used throughout:
 | 5 | Scan pipeline (`scan/pipeline.py`, `scan/findings.py`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, per §6) | `0861a16` | 120 passed |
 | 6 | LLM verifier (`scan/verifier.py`) | SOLID (mechanism, unit-tested) / NEEDS INTEGRATION (no live Groq key exercised yet) | `ca0f368` | 134 passed |
 | 7 | Reporting + CLI wiring (`report/`, `codegate scan`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, cost estimates, per §6) | — | 176 passed |
-| 9 | Demo assets | NOT STARTED | — | — |
+| 9 | Demo assets (`examples/vulnerable_app/`) | SOLID | — | 177 passed |
 | 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
 
-Current test suite: **176 passed**, 0 failed, ~225s wall clock
+Current test suite: **177 passed**, 0 failed, ~230s wall clock
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -682,10 +682,74 @@ today — the PDF cover carries the same provisional banner `codegate
 info` already prints — but the *numbers themselves* will change, not
 just become more confident, once Phase 8 retrains.
 
-### Phase 9 — `NOT STARTED`
+### Phase 9 — Demo assets (`examples/vulnerable_app/`) — `SOLID`
 
-Demo assets (`examples/vulnerable_app/`) are planned but not yet built.
-See the plan file for the current design.
+**What was done.** Six files: `database.py`, `system_tasks.py`,
+`config.py` each carry one vulnerable function (CWE-89/78/798) paired
+with its direct safe fix, plus a no-pattern-at-all `list_active_users`/
+`list_directory`/`get_api_key` sibling; `report_utils.py` is entirely
+safe, ordinary computation; `app.py` ties the modules together into
+something that reads like a real (small) app; `README.md` documents the
+CWE/function table and the quickstart commands. A generated
+`sample_report.pdf` is committed alongside so a reviewer sees real PDF
+output without installing or running anything.
+
+**Decisions taken and why.**
+- **Every vulnerable function is paired with its own direct fix in the
+  same file**, not just "some safe files elsewhere" — the plan's
+  explicit ask was a demo that shows *discrimination*, not just
+  detection, and `get_user_by_name`/`get_user_by_id` sitting next to
+  each other is what makes that legible at a glance.
+- **A neutral, zero-pattern file (`report_utils.py`) included on
+  purpose** — without it, every file in the demo would contain at least
+  one flagged pattern, which wouldn't demonstrate that the scanner
+  leaves genuinely unrelated code alone.
+- **The sample PDF was generated with `--no-llm`** so the committed
+  artifact doesn't depend on (or imply) a `GROQ_API_KEY` being available
+  to whoever's reviewing it — consistent with the "works with zero setup
+  on a fresh clone" decision from Phase 2/3.
+
+**A real bug found and fixed while generating the sample PDF by hand —
+not caught by any test until this step.** `report/pdf.py::_findings_flowables`
+interpolated `Finding.func_name`, `.file`, `.cwe`, `.severity`, `.source`
+directly into `Paragraph` text without XML-escaping. This was invisible
+on every fixture used in Phase 7's own tests (plain identifiers like
+`get_user`), but the scan pipeline's own fallback for a module-level
+semgrep hit uses the literal string `"<module>"` as `func_name` (see
+`scan/pipeline.py::_semgrep_findings`) — and reportlab's `Paragraph`
+parses `<...>` as an XML tag. An unrecognized tag is silently dropped,
+so the rendered heading read `config.py:5 -- ()` instead of
+`config.py:5 -- <module>()`, with no error, warning, or crash anywhere.
+Caught only by opening the actual generated PDF and reading it, exactly
+the kind of defect Phase 7's own "hand-test the real output" lesson
+(rich markup corrupting JSON, ellipsis mojibake) already flagged as a
+class of bug the unit suite can't catch on its own. Fixed by escaping
+every dynamic string that reaches a `Paragraph` in `report/pdf.py`
+(findings' `file`/`func_name`/`cwe`/`severity`/`source`, and the cover
+page's `target`/`ranker_id`/`corpus_version`/`verifier_model`) — the
+cover page's `target` in particular is a raw CLI argument, so this
+wasn't only a `"<module>"`-shaped risk. Added
+`test_findings_flowables_escapes_angle_bracket_func_name` as a
+regression test, asserting on `Paragraph.text` (reportlab exposes the
+pre-render markup string directly, so this doesn't need to render an
+actual PDF and extract text from it).
+
+**Evidence.** Real `codegate scan examples/vulnerable_app --no-llm`
+output: 14 units, 9 auto-approved, 5 escalated, 8 findings -- semgrep
+correctly catches all three planted vulnerabilities (CWE-89 in
+`get_user_by_name`, CWE-78 in `ping_host`, CWE-798 on
+`DATABASE_PASSWORD`) with zero false positives on the static side; the
+gate additionally escalates several of the *safe* functions for review,
+which is expected and not a defect -- it's exactly what "provisional"
+means (§6), and the PDF's own cover banner says so. Verified in all four
+formats (`terminal`, `json`, `sarif`, `pdf`); the PDF was opened and
+visually inspected page by page (not just checked for a byte signature)
+both before and after the escaping fix. 177 tests passing (was 176).
+
+**Status rationale.** `SOLID` — every file in the demo, the README, and
+the committed sample report were all generated and verified against the
+real, current codebase this session, not written speculatively ahead of
+what the tool actually does.
 
 ## 4 · Decision log
 
@@ -765,9 +829,10 @@ end-to-end:**
   simulated run, including the one now committed at `data/model/` —
   correctly labeled `is_provisional: true`
 
-**Not started:** Phase 9 (demo assets, `examples/vulnerable_app/`).
-Everything else through Phase 7 is built, tested, and wired end to end —
-`codegate scan` is a real command now, not a stub.
+**Not started:** nothing in Track B — every phase through Phase 9 is
+built, tested, and (where applicable) verified against real output.
+Only Phase 8 (retrain on the real corpus) remains, and it is blocked on
+Track A, not on anything left to design or build here.
 
 ## 6 · Building ahead of the trained model — the evidence
 
@@ -809,7 +874,7 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-176 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+177 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 verified this session).
 
 | File | Tests | Protects |
@@ -820,7 +885,7 @@ verified this session).
 | `test_verifier.py` | 14 | JSON verdict parsing (clean/embedded-in-prose/malformed/missing-field/unrecognized-CWE), no-backend and backend-exception degradation, unparseable-response non-caching, cache write and cache-hit-skips-backend, `Finding` mapping incl. lineno fallback, `build_verifier_backend`'s key-present/absent branches and role-to-model-id mapping |
 | `test_cli.py` | 13 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate + provisional banner, version-guard surfaced through the CLI, invalid `--format` rejection, `--alpha` rejection, real `scan` runs across `terminal`/`json`/`sarif`/`pdf`, JSON/PDF written to `--output`, end-to-end `calibrate` artifact write |
 | `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
-| `test_report_pdf.py` | 10 | Pygments-to-reportlab-markup highlighting (keyword coloring, indentation, XML escaping), excerpt extraction around a line, a real generated PDF's byte signature and size, zero-findings/no-certificate/missing-source-file/missing-output-dir edge cases |
+| `test_report_pdf.py` | 11 | Pygments-to-reportlab-markup highlighting (keyword coloring, indentation, XML escaping), excerpt extraction around a line, the `"<module>"`-func-name escaping regression (Phase 9), a real generated PDF's byte signature and size, zero-findings/no-certificate/missing-source-file/missing-output-dir edge cases |
 | `test_ingest.py` | 9 | Function/method/nested-function extraction, lineno/hash correctness, hash stability, syntax-error and unreadable-file reporting, `venv` skip, `.gitignore` honoring, missing-path error |
 | `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
 | `test_report_json_sarif.py` | 6 | JSON round-trips with correct counts, null certificate when unscored, SARIF 2.1.0 shape, severity-to-SARIF-level mapping, POSIX-path locations, one rule per tracked CWE plus UNSPECIFIED |

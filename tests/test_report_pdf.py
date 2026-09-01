@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from codegate.report.pdf import _highlight, _read_excerpt, generate_pdf
+from codegate.report.pdf import _findings_flowables, _highlight, _read_excerpt, _styles, generate_pdf
 from codegate.research.artifacts import Calibration
 from codegate.scan.findings import Finding
 from codegate.scan.ingest import SkippedFile
@@ -54,6 +54,23 @@ def test_read_excerpt_returns_empty_for_a_missing_file(tmp_path):
     excerpt, first_line = _read_excerpt(tmp_path / "does_not_exist.py", line=1)
     assert excerpt == ""
     assert first_line == 0
+
+
+def test_findings_flowables_escapes_angle_bracket_func_name():
+    # Regression: a module-level finding's func_name is the literal string
+    # "<module>" (scan/pipeline.py::_semgrep_findings' fallback). Passed
+    # unescaped into a reportlab Paragraph, "<module>" is parsed as an
+    # (invalid, silently dropped) XML tag, leaving the heading as
+    # "file.py:5 -- ()" -- caught by hand-inspecting a real generated PDF.
+    finding = Finding(
+        file=Path("app/config.py"), line=5, func_name="<module>", cwe="CWE-798",
+        severity="WARNING", source="semgrep", confidence=1.0,
+        message="hardcoded credential", fix_hint="",
+    )
+    flow = _findings_flowables(_styles(), _result(findings=[finding]))
+    heading = next(f for f in flow if getattr(f, "text", "").startswith("app"))
+    assert "&lt;module&gt;" in heading.text
+    assert "<module>" not in heading.text.replace("&lt;module&gt;", "")
 
 
 def test_generate_pdf_produces_a_real_pdf_file(tmp_path):

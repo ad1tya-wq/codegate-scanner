@@ -1388,7 +1388,22 @@ suite didn't.
 
 ---
 
-## Not yet written
+## `examples/vulnerable_app/` — demo target (Phase 9)
 
-Phase 9 will add a section here, in the same commit as the code:
-- **Phase 9** — `examples/vulnerable_app/` (demo assets, not library code)
+Not library code, so no per-function entries here (per this doc's own
+scope note above) -- see `examples/vulnerable_app/README.md` for the
+full CWE/function table and `docs/ENGINEERING_LOG.md`'s Phase 9 entry
+for what building it caught (a real `Paragraph`-escaping bug in
+`report/pdf.py`, fixed the same session). Six files: `database.py`,
+`system_tasks.py`, `config.py` (one vulnerable function + its direct
+fix each, for CWE-89/78/798 respectively), `report_utils.py` (entirely
+safe), `app.py` (ties them together), `README.md`. A generated
+`sample_report.pdf` is committed alongside.
+
+## Status
+
+Every module through Phase 9 now has a section above. Only Phase 8
+(retrain on the real corpus, once Track A lands) remains, and it
+changes floats inside `data/model/model.joblib` and
+`data/model/calibration.json`, not any function's signature or
+behavior described in this document.
