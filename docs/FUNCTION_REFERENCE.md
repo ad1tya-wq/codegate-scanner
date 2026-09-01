@@ -1031,11 +1031,115 @@ session). Proven not to execute scanned code via a sentinel-file test
 
 ---
 
+## `scan/verifier.py` — resolving escalated units with one LLM call each (Phase 6)
+
+The third ONLINE-half module. Takes a unit the gate escalated (Phase 5's
+`_rank_and_gate`) and asks an LLM for one structured verdict, cached so a
+re-scan of unchanged code never re-asks.
+
+#### `VerifierBackend` (Protocol)
+**Does:** The minimal interface a verifier backend must satisfy:
+`ask(code: str) -> str`, returning the raw completion text. Deliberately
+not the research-side `Backend` ABC (`generate(Prompt, seed) -> str`) —
+verification sends a real code snippet and expects a JSON verdict back,
+not a generation task keyed on a `Prompt` object, so a separate,
+narrower interface is honest about the different contract rather than
+forcing an artificial `Prompt` into a scan context that has none.
+**Talks to:** Implemented by `GroqVerifierBackend`; consumed by
+`verify_unit`.
+**Fits in:** ONLINE.
+
+#### `VerifierResult` (frozen dataclass)
+**Does:** One parsed verdict: `vulnerable`, `cwe` (one of the three
+tracked CWEs or `None`), `line`, `reason`, `fix_hint`.
+**Talks to:** Produced by `_parse_verdict`; consumed by `verify_unit`
+(cache round-trip) and `to_finding`.
+**Fits in:** ONLINE.
+
+#### `GroqVerifierBackend.ask(code) -> str`
+**Does:** Sends `code` as the user message (with a fixed system prompt
+demanding strict-JSON-only output) to Groq's OpenAI-compatible chat
+completions endpoint at `temperature=0`, returns the raw completion
+text.
+**Talks to:** Constructed by `build_verifier_backend`. Same request
+shape as `research/generation/backends.py::GroqBackend` (same endpoint,
+same bearer-auth header) — the HTTP pattern is shared even though the
+interface isn't.
+**Tech:** `requests`.
+**Fits in:** ONLINE — the real (non-stub) verifier backend.
+
+#### `build_verifier_backend(model) -> VerifierBackend | None`
+**Does:** Reads `GROQ_API_KEY` via `env.py::get_env` (optional — absence
+returns `None`, not an error). Maps `model` (a config.yaml role name
+like `"llama-3.3-70b-groq"`) to the real Groq API model id via
+`_GROQ_MODEL_IDS` before constructing `GroqVerifierBackend`.
+**Talks to:** Calls `env.py::get_env`. Will be called by `cli.py::scan`
+(Phase 7) to build the backend once per scan invocation, passing
+`cfg.verifier` as `model`.
+**Fits in:** ONLINE — degrade-without-keys entry point for verification,
+same discipline as the rest of the project (`consensus.py`'s optional
+adjudicator, `codegate info` on a missing model).
+
+#### `_parse_verdict(raw) -> VerifierResult | None`
+**Does:** Regex-extracts the first `{...}` block from `raw` (tolerating
+prose wrapped around the JSON, which real LLMs frequently add despite
+instructions not to), `json.loads`s it, and validates shape:
+`vulnerable` must actually be a bool, `cwe` must be one of the three
+tracked CWEs or gets coerced to `None`, `line` must be an int or becomes
+`None`. Returns `None` — never raises — on any parse or shape failure.
+**Talks to:** Called by `verify_unit`.
+**Tech:** stdlib `re`, `json`.
+**Fits in:** ONLINE — the untrusted-LLM-output boundary.
+
+#### `_cache_path`, `_load_cached`, `_save_cache`
+**Does:** The on-disk cache, one JSON file per `content_hash` under
+`.codegate_cache/` (default; caller-overridable). `_load_cached` returns
+`None` (not raise) on a missing or corrupt cache file, so a hand-edited
+or partially-written cache entry degrades to "ask again," never crashes
+a scan. `_save_cache` only ever gets called with an already-validated
+`VerifierResult`.
+**Talks to:** Called by `verify_unit`.
+**Tech:** stdlib `json`, `pathlib`, `dataclasses.asdict`.
+**Fits in:** ONLINE — the mechanism behind the project's "re-scanning
+unchanged code costs zero calls" claim (Phase 7's accounting will read
+cache hits vs. misses for the savings estimate).
+
+#### `verify_unit(unit, backend, cache_dir=DEFAULT_CACHE_DIR) -> VerifierResult | None`
+**Does:** The public entry point: cache hit → return it, no call made;
+no `backend` → `None`; backend call raises (`requests.RequestException`
+or a malformed-response `KeyError`/`IndexError`/`ValueError`) → `None`;
+response fails `_parse_verdict` → `None`, and nothing is cached; a valid
+verdict is cached and returned. Every `None` path means "still needs
+review" to the caller — never "confirmed safe."
+**Talks to:** Calls `_load_cached`, `backend.ask`, `_parse_verdict`,
+`_save_cache`. Will be called once per escalated unit by `scan/pipeline.py`
+or `cli.py::scan` once Phase 7 wires the verifier into the scan flow.
+**Fits in:** ONLINE — resolves what Phase 5's gate could only escalate.
+
+#### `to_finding(unit, result) -> Finding`
+**Does:** Turns a `VerifierResult` the caller has already confirmed is
+`vulnerable` into a `Finding(source="verifier", confidence=1.0, ...)`,
+falling back to `unit.lineno` when the verdict didn't include a line
+number. Callers only call this for confirmed-vulnerable results — a
+cleared unit produces no finding, mirroring how an auto-approved unit
+(Phase 5) produces none either.
+**Talks to:** Called by whichever Phase 7 code assembles the final
+`ScanResult.findings` list from verifier output.
+**Fits in:** ONLINE — the verifier's exit into the common `Finding`
+currency the report (Phase 7) consumes.
+
+**Verified:** `tests/test_verifier.py` (14 tests) against a stub
+`VerifierBackend`, including a call-counting stub proving the second
+`verify_unit` call on the same `content_hash` never touches the backend.
+No live Groq call has been made yet — see `docs/ENGINEERING_LOG.md`,
+Phase 6 entry, "needs integration testing."
+
+---
+
 ## Not yet written
 
-Phases 6–7 and 9 will each add a section here, in the same commit as the
+Phases 7 and 9 will each add a section here, in the same commit as the
 code:
-- **Phase 6** — `scan/verifier.py`: escalation LLM call, content-hash cache
 - **Phase 7** — `report/pdf.py`, `report/remediation.py`,
   `report/accounting.py`, `report/json_sarif.py`
 - **Phase 9** — `examples/vulnerable_app/` (demo assets, not library code)

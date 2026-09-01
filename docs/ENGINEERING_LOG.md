@@ -28,13 +28,13 @@ Four status labels are used throughout:
 | 2 | Persistence layer (`research/artifacts.py`) | SOLID (mechanism) / PROVISIONAL (current artifact) | `8f5bed3` | 97 passed |
 | 3 | Packaging + CLI (`info`, `calibrate` solid; `scan` scaffolded) | SOLID (`info`/`calibrate`) / NOT STARTED (`scan` — Phase 4-7 dependency) | `e1dbff4` | 104 passed |
 | 4 | Ingest (`scan/ingest.py`) | SOLID | `2bbdd2c` | 113 passed |
-| 5 | Scan pipeline (`scan/pipeline.py`, `scan/findings.py`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, per §6) | — | 120 passed |
-| 6 | LLM verifier | NOT STARTED | — | — |
+| 5 | Scan pipeline (`scan/pipeline.py`, `scan/findings.py`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, per §6) | `0861a16` | 120 passed |
+| 6 | LLM verifier (`scan/verifier.py`) | SOLID (mechanism, unit-tested) / NEEDS INTEGRATION (no live Groq key exercised yet) | — | 134 passed |
 | 7 | PDF reporting | NOT STARTED | — | — |
 | 9 | Demo assets | NOT STARTED | — | — |
 | 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
 
-Current test suite: **120 passed**, 0 failed, ~135s wall clock
+Current test suite: **134 passed**, 0 failed, ~140s wall clock
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -485,10 +485,81 @@ scanned code. The *numbers* the model-gate half produces
 per §6 until Phase 8's retrain, exactly as G1/G2 require; nothing in this
 phase's tests or evidence treats those numbers as meaningful yet.
 
-### Phases 6–7, 9 — `NOT STARTED`
+### Phase 6 — LLM verifier (`scan/verifier.py`) — `SOLID` (mechanism) / `NEEDS INTEGRATION` (live key)
 
-LLM verifier, PDF reporting, and demo assets are all planned but not yet
-built. See the plan file for the current design of each.
+**What was done.** Added `verify_unit(unit, backend, cache_dir)`: one
+constrained LLM call per escalated unit, asking the model to return a
+strict JSON verdict (`vulnerable`, `cwe`, `line`, `reason`, `fix_hint`)
+for the single function shown. Results are cached on disk at
+`.codegate_cache/<content_hash>.json`, so re-scanning unchanged code
+costs zero calls — the missing half of the project's cost-savings claim,
+previously entirely unbuilt. `to_finding` turns a confirmed-vulnerable
+result into a `Finding(source="verifier")`; a cleared result produces no
+finding, same as an auto-approved unit.
+
+**Decisions taken and why.**
+- **A dedicated `VerifierBackend` protocol (`ask(code) -> str`), not a
+  reuse of the research-side `Backend` ABC.** The plan called for reusing
+  `Backend`, but `Backend.generate(prompt: Prompt, seed: int) -> str` is
+  shaped for corpus generation — a `Prompt` object with `.task`,
+  `.cwe`, `.flavor`. Verification sends a real code snippet and expects a
+  structured JSON verdict back, not free-form code; forcing a `Prompt`
+  object into that call would mean fabricating one from scan data that
+  doesn't have prompt semantics. `GroqVerifierBackend` still reuses the
+  same request shape as `research/generation/backends.py::GroqBackend`
+  (same endpoint, same auth header pattern) — the code path is shared in
+  spirit, just not the literal ABC.
+- **`verifier: llama-3.3-70b-groq` (config.yaml) is a role name, not a
+  literal API model id.** `_GROQ_MODEL_IDS` maps it to the real Groq
+  model string (`llama-3.3-70b-versatile`) explicitly, rather than
+  passing the config value straight through and hoping it happens to
+  match the provider's naming — a wrong guess here would silently 404
+  every verification call.
+- **No key → `build_verifier_backend` returns `None`, not an error.**
+  Matches the project's existing degrade-without-keys discipline
+  (`consensus.py`'s adjudicator-optional design, Phase 3's `codegate
+  info` on a missing model). `verify_unit(unit, backend=None, ...)`
+  short-circuits to `None` before ever touching the network.
+- **Any backend failure — network error, timeout, malformed JSON, a
+  response that doesn't obey the requested shape — degrades to `None`,
+  never raises out of `verify_unit`.** `_parse_verdict` validates
+  `vulnerable` is actually a bool and `cwe` is one of the three tracked
+  CWEs (coercing anything else to `None`) before trusting any field.
+  Callers must treat `None` as "still needs review," never as "confirmed
+  safe" — an LLM that fails to respond usefully is not evidence of
+  safety, exactly the same principle as the research side's
+  `LABEL_ABSTAIN` (Phase 1) and the semgrep oracle's error-not-crash
+  degradation (`oracles/semgrep_oracle.py`).
+- **Cache keyed by `content_hash`, written only on a successfully parsed
+  verdict.** An unparseable or failed response is never cached — caching
+  a failure would mean a transient network blip permanently marks a unit
+  as unverifiable until the cache is manually cleared.
+
+**Evidence.** `tests/test_verifier.py` (14 tests): JSON verdict parsing
+(clean, embedded in prose, malformed, missing required field,
+unrecognized CWE coerced to `None`), no-backend short-circuit, backend
+exception handling, unparseable-response handling (and that it isn't
+cached), cache write on success, cache hit skipping a second backend call
+(call-counting stub), `Finding` field mapping including the
+`unit.lineno` fallback when the verdict omits a line number, and
+`build_verifier_backend`'s no-key/with-key branches including the
+role-name-to-model-id mapping. 134 tests passing (was 120).
+
+**Status rationale.** `SOLID` for the mechanism — parsing, caching, and
+degradation are all exercised against a stub backend, and every failure
+mode (no key, network error, bad JSON, wrong shape) has a dedicated test
+proving it degrades to "needs review" rather than crashing or lying.
+`NEEDS INTEGRATION` because no test has exercised a live Groq API call —
+`GroqVerifierBackend.ask` itself is untested against the real endpoint,
+same caveat Phase 0/1's confidence assessment already carries for
+`OllamaBackend`/`OpenRouterBackend` (§5). Not wired into `run_scan` yet —
+that lands with Phase 7, alongside the CLI wiring and report formatter
+`scan.pipeline`'s escalated findings will need to be handed to.
+
+### Phases 7, 9 — `NOT STARTED`
+
+PDF reporting and demo assets are planned but not yet built. See the
+plan file for the current design of each.
 
 ## 4 · Decision log
 
@@ -545,6 +616,10 @@ end-to-end:**
 - `GeminiBackend` and the adjudicator path — implemented, never called
   once; `label_row`'s `adjudicator_verdict` stays hardcoded `False` until
   it is wired in
+- `GroqVerifierBackend.ask()` against the real Groq endpoint — every
+  Phase 6 test exercises `verify_unit`/`_parse_verdict` against a stub
+  backend; the actual HTTP call, auth header, and real model's JSON
+  discipline are unverified until a live `GROQ_API_KEY` run happens
 
 **Provisional — runs, but the output shouldn't be trusted yet:**
 - Every score the interim `R2Ranker` produces (trained on 540 simulated,
@@ -555,13 +630,14 @@ end-to-end:**
   simulated run, including the one now committed at `data/model/` —
   correctly labeled `is_provisional: true`
 
-**Not started:** Phases 6–7, 9 (verifier, PDF reporting, demo assets).
+**Not started:** Phases 7, 9 (PDF reporting, demo assets).
 `codegate scan` (the CLI command) still reports itself as not
 implemented (see Phase 3 entry above) — the underlying engine
-(`scan.pipeline.run_scan`, Phase 5) exists and is tested, but the CLI
-isn't wired to it yet because there is no report formatter for any of
-`terminal`/`json`/`sarif`/`pdf` to hand its output to; that wiring lands
-alongside Phase 7, once there's something real to format the findings
+(`scan.pipeline.run_scan`, Phase 5) and the verifier
+(`scan.verifier.verify_unit`, Phase 6) both exist and are tested, but
+neither is wired into the CLI yet because there is no report formatter
+for any of `terminal`/`json`/`sarif`/`pdf` to hand their output to; that
+wiring lands alongside Phase 7, once there's something real to format the findings
 into.
 
 ## 6 · Building ahead of the trained model — the evidence
@@ -604,7 +680,7 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-120 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+134 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 verified this session).
 
 | File | Tests | Protects |
@@ -614,6 +690,7 @@ verified this session).
 | `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
 | `test_ingest.py` | 9 | Function/method/nested-function extraction, lineno/hash correctness, hash stability, syntax-error and unreadable-file reporting, `venv` skip, `.gitignore` honoring, missing-path error |
 | `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
+| `test_verifier.py` | 14 | JSON verdict parsing (clean/embedded-in-prose/malformed/missing-field/unrecognized-CWE), no-backend and backend-exception degradation, unparseable-response non-caching, cache write and cache-hit-skips-backend, `Finding` mapping incl. lineno fallback, `build_verifier_backend`'s key-present/absent branches and role-to-model-id mapping |
 | `test_scan_pipeline.py` | 7 | `Finding` source validation, semgrep-to-function mapping, the no-execution invariant (sentinel-file proof), gate partitioning under a permissive threshold, full escalation under an uncertified threshold, skipped-file reporting, actionable missing-model error |
 | `test_cli.py` | 7 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate + provisional banner, version-guard surfaced through the CLI, invalid `--format` rejection, `scan`'s not-implemented exit code, end-to-end `calibrate` artifact write |
 | `test_generation_resume.py` | 6 | Checkpoint write/read, resume-skips-completed, partial-failure doesn't abort the batch |

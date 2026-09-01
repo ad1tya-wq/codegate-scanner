@@ -26,3 +26,9 @@ data/model/*
 htmlcov/
 *.log
 logs/
+
+# scan/verifier.py's on-disk LLM-verdict cache, keyed by content_hash.
+# Regenerable (worst case: a re-scan re-asks the LLM), and inherently
+# tied to whatever code a user last scanned locally -- never meant to be
+# committed.
+.codegate_cache/
