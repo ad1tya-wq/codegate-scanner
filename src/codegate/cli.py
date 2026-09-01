@@ -7,10 +7,15 @@ from rich.table import Table
 
 from codegate.config import load_config
 from codegate.env import get_env
+from codegate.report.json_sarif import to_json, to_sarif
+from codegate.report.pdf import generate_pdf
+from codegate.report.terminal import render_terminal
 from codegate.research.artifacts import ArtifactVersionError, load_artifacts
 from codegate.research.corpus.prompts import load_prompt_bank
 from codegate.research.generation.backends import OllamaBackend, SimulatedBackend, stable_seed
 from codegate.research.pipeline import run_full_pipeline
+from codegate.scan.pipeline import run_scan
+from codegate.scan.verifier import build_verifier_backend
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
@@ -103,20 +108,66 @@ def calibrate(
 def scan(
     path: Path = typer.Argument(..., help="File or directory to scan"),
     format: str = typer.Option("terminal", "--format", help="pdf | json | sarif | terminal"),
-    output: Path = typer.Option(None, "--output"),
+    output: Path = typer.Option(None, "--output", help="Write the report here (json/sarif/pdf); defaults to stdout for json/sarif, codegate_report.pdf for pdf"),
     no_llm: bool = typer.Option(
         False, "--no-llm", help="Skip the LLM verifier; escalated findings report as needs-review"
     ),
     alpha: float = typer.Option(None, "--alpha", help="Override the certified max miss-rate"),
+    model_dir: Path = typer.Option(
+        DEFAULT_MODEL_DIR, "--model-dir",
+        help="Directory containing model.joblib and calibration.json",
+    ),
+    config: Path = typer.Option(
+        Path("config.yaml"), "--config", help="Used only to look up the verifier model name",
+    ),
 ) -> None:
     """Scan a file or directory and produce a findings report."""
     if format not in _VALID_FORMATS:
         console.print(f"[red]--format must be one of {_VALID_FORMATS} (got '{format}').[/red]")
         raise typer.Exit(code=1)
 
-    console.print(
-        "[yellow]`codegate scan` is not implemented yet[/yellow] -- ingest, the "
-        "scan pipeline, and reporting are Phases 4-7 (see docs/ENGINEERING_LOG.md, "
-        "Part 3). `codegate info` and `codegate calibrate` are functional today."
-    )
-    raise typer.Exit(code=2)
+    if alpha is not None:
+        console.print(
+            "[red]--alpha is not implemented yet[/red] -- overriding the certified "
+            "threshold requires recomputing it from the calibration trace against a "
+            "real corpus, deferred until Track A lands (see docs/ENGINEERING_LOG.md, "
+            "section 6). Re-run `codegate calibrate` if you need a different alpha."
+        )
+        raise typer.Exit(code=2)
+
+    verifier_model: str | None = None
+    verifier_backend = None
+    if not no_llm:
+        try:
+            verifier_model = load_config(str(config)).verifier
+        except FileNotFoundError:
+            verifier_model = None  # no config.yaml in this directory -- scan still runs, just without LLM verification
+        if verifier_model is not None:
+            verifier_backend = build_verifier_backend(verifier_model)
+
+    try:
+        result = run_scan(path, model_dir=model_dir, verifier=verifier_backend)
+    except (FileNotFoundError, ArtifactVersionError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+
+    if format == "terminal":
+        render_terminal(result, path, console, verifier_model)
+    elif format == "json":
+        text = to_json(result, path, verifier_model)
+        if output is not None:
+            output.write_text(text)
+            console.print(f"Wrote {output}")
+        else:
+            print(text)  # not console.print -- rich would line-wrap and markup-parse the JSON
+    elif format == "sarif":
+        text = to_sarif(result, path)
+        if output is not None:
+            output.write_text(text)
+            console.print(f"Wrote {output}")
+        else:
+            print(text)  # not console.print -- rich would line-wrap and markup-parse the JSON
+    elif format == "pdf":
+        out_path = output or Path("codegate_report.pdf")
+        generate_pdf(result, path, out_path, verifier_model)
+        console.print(f"Wrote {out_path}")

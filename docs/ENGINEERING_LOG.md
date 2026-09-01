@@ -29,12 +29,12 @@ Four status labels are used throughout:
 | 3 | Packaging + CLI (`info`, `calibrate` solid; `scan` scaffolded) | SOLID (`info`/`calibrate`) / NOT STARTED (`scan` — Phase 4-7 dependency) | `e1dbff4` | 104 passed |
 | 4 | Ingest (`scan/ingest.py`) | SOLID | `2bbdd2c` | 113 passed |
 | 5 | Scan pipeline (`scan/pipeline.py`, `scan/findings.py`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, per §6) | `0861a16` | 120 passed |
-| 6 | LLM verifier (`scan/verifier.py`) | SOLID (mechanism, unit-tested) / NEEDS INTEGRATION (no live Groq key exercised yet) | — | 134 passed |
-| 7 | PDF reporting | NOT STARTED | — | — |
+| 6 | LLM verifier (`scan/verifier.py`) | SOLID (mechanism, unit-tested) / NEEDS INTEGRATION (no live Groq key exercised yet) | `ca0f368` | 134 passed |
+| 7 | Reporting + CLI wiring (`report/`, `codegate scan`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, cost estimates, per §6) | — | 176 passed |
 | 9 | Demo assets | NOT STARTED | — | — |
 | 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
 
-Current test suite: **134 passed**, 0 failed, ~140s wall clock
+Current test suite: **176 passed**, 0 failed, ~225s wall clock
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -556,10 +556,136 @@ same caveat Phase 0/1's confidence assessment already carries for
 that lands with Phase 7, alongside the CLI wiring and report formatter
 `scan.pipeline`'s escalated findings will need to be handed to.
 
-### Phases 7, 9 — `NOT STARTED`
+### Phase 7 — Reporting + CLI wiring (`report/`, `codegate scan`) — `SOLID` (mechanism) / `PROVISIONAL` (numbers)
 
-PDF reporting and demo assets are planned but not yet built. See the
-plan file for the current design of each.
+**What was done.** The major deliverable: `codegate scan` now actually
+scans. Four report formats (`terminal`/`json`/`sarif`/`pdf`), all reading
+from the same `ScanResult` with no LLM writing any report prose —
+`report/remediation.py` is a hardcoded per-CWE lookup (explanation +
+before/after code), `report/accounting.py` turns raw token/call counts
+into a priced estimate, `report/json_sarif.py` and `report/terminal.py`
+render deterministically, `report/pdf.py` (reportlab + pygments) produces
+the full 7-section document the plan specified: cover, executive
+summary, detection attribution, cost & token accounting, findings detail
+with syntax-highlighted excerpts, coverage & certificate, methodology.
+Wiring this in required extending Phase 5/6's `run_scan` and `ScanResult`
+themselves — the verifier (Phase 6) wasn't actually called from the scan
+path until this phase, since there was nowhere to route its output until
+a report existed to hand it to.
+
+**Decisions taken and why.**
+- **`run_scan` gained `verifier`/`cache_dir` parameters, both
+  backward-compatible.** `verifier=None` (the default) reproduces Phase
+  5's exact behavior — every existing Phase 5 test still passes
+  unmodified. When a backend is given, each escalated unit gets at most
+  one `verify_unit` call: confirmed-vulnerable becomes a
+  `source="verifier"` finding, cleared produces no finding (same
+  convention as an auto-approved unit), unresolved falls back to the
+  existing "needs review" finding. `_rank_and_gate` and the new
+  `_resolve_escalated` were split so the gate's scoring logic and the
+  verifier's resolution logic stay independently testable.
+- **`ScanResult` grew nine fields** (`n_verified_confirmed/cleared/
+  unresolved`, `n_verifier_cache_hits/calls_made`, `tokens_saved/spent`,
+  `calibration`) — all with defaults, so no existing test constructing a
+  `ScanResult` needed to change. This was the honest alternative to
+  either (a) a separate "accounting" pass that re-derives these numbers
+  by re-reading the scan target after the fact (duplicated, and
+  potentially inconsistent, logic), or (b) computing them once, inline,
+  at the only point the per-unit `token_estimate` and cache-hit status
+  are naturally available.
+- **Token accounting is explicitly an estimate, disclosed as data, not
+  prose.** `CostSummary.is_estimate` is a real field a renderer must
+  read, not a docstring note a renderer could silently drop. Tokens
+  spent = the chars/4 heuristic (`Unit.token_estimate`, from Phase 4) for
+  every escalated unit that got a fresh (non-cached) call this run, plus
+  a fixed 150-token system-prompt overhead per call — both documented
+  constants, not measurements, printed as assumptions in the PDF's cost
+  section. This matches the plan's explicit instruction: "Label it an
+  estimate and print the assumptions in the report."
+- **A hardcoded Groq price
+  (`$0.59`/1M tokens for `llama-3.3-70b-versatile`, checked 2026-08-31)
+  in a plain dict, not a live pricing API call.** A report must be
+  reproducible from the numbers it was run with; a price that can change
+  between generating a report and reading it would make the report lie
+  about its own recent past.
+- **`--alpha` explicitly rejected (exit code 2), not silently ignored.**
+  Overriding the certified threshold post hoc would require recomputing
+  it from the persisted `LTTResult.trace` against a real frontier —
+  deferred until Track A lands, exactly as this log's §6 already flagged.
+  An accepted-but-ignored flag would be a silent lie about what the scan
+  actually certified; a loud, explained rejection is consistent with
+  every other degrade-honestly decision in this project.
+- **JSON/SARIF stdout uses plain `print()`, not `console.print()`.**
+  Caught by hand while smoke-testing the real CLI against the repo's own
+  `src/`: rich's `Console.print` line-wraps at terminal width and parses
+  `[...]`-style markup, both of which corrupt structured JSON output
+  (a JSON key doesn't need reformatting, and a stray `[` in a string
+  value has nothing to do with rich's bbcode-like tags). `console.print`
+  stays for the `terminal` format and for status lines like `Wrote
+  <path>`, where rich's formatting is exactly what's wanted.
+- **Findings-table columns use `overflow="fold"`, not rich's default
+  ellipsis truncation.** Also caught by hand-testing the real CLI: the
+  default truncation marker is a Unicode ellipsis character that renders
+  as mojibake on a default-codepage Windows terminal — the same class of
+  bug as the `§`-symbol fix from Phase 3 (see `ENGINEERING_LOG.md`'s
+  earlier note; this log's own text now avoids that character too).
+  Folding wraps long file paths onto extra lines instead of truncating
+  them into an unreadable path fragment either way.
+- **PDF code excerpts read the file from disk at report-generation
+  time, keyed on `Finding.file`/`.line`, rather than threading `Unit`
+  source text through `ScanResult`.** `Finding` and `ScanResult` stay the
+  lean, JSON-serializable shape the JSON/SARIF formatters already commit
+  to; only the PDF formatter needs highlighted source, and the scan
+  target's files are still on disk (same process, same invocation) when
+  the report renders. `_read_excerpt` degrades to an empty excerpt
+  (never raises) if a file has moved or been deleted between scan and
+  render.
+- **Syntax highlighting hand-rolls pygments token colors into reportlab's
+  restricted `<font color=...>` Paragraph markup**, not an HTML-to-PDF
+  conversion. reportlab Paragraph accepts a small XML-like subset, not
+  full HTML/CSS, so `pygments.formatters.HtmlFormatter` output would need
+  its own translation layer anyway; lexing tokens directly and mapping a
+  handful of token-type prefixes (Keyword, String, Comment, Number,
+  Operator, Name.Builtin) to hex colors is fewer moving parts for a
+  3-CWE Python-only scanner's excerpts.
+
+**Evidence.** 42 new tests across five files: `test_report_remediation.py`
+(3), `test_report_accounting.py` (5), `test_report_json_sarif.py` (6),
+`test_report_pdf.py` (10, including a real generated-PDF byte-signature
+check), `test_report_terminal.py` (4), plus 14 new/changed tests in
+`test_scan_pipeline.py` (verifier wiring, token/call accounting, the
+calibration pass-through) and `test_cli.py` (real `scan` invocations
+across all four formats, replacing the old not-implemented stub test).
+176 tests passing (was 134).
+
+Also verified by hand against the real, committed `data/model/`
+artifacts and the repo's own `src/` tree (not a fixture): `codegate scan
+src --no-llm` correctly reports 104 units, 87 auto-approved, 17
+escalated, 17 findings; `--format json`/`--format sarif` both produce
+valid, parseable output; `--format pdf` produces a real, valid PDF
+(`%PDF-1.4` header, 15KB, 7 sections, syntax-highlighted excerpts) —
+opened and visually inspected (cover page, executive summary, detection
+attribution and cost tables) rather than only checked for a byte
+signature. This hand-testing is what caught the rich-markup/JSON-wrapping
+bug and the ellipsis-mojibake bug above; neither was caught by the unit
+suite, which used `CliRunner`'s captured output rather than a real
+terminal/codepage.
+
+**Status rationale.** `SOLID` for the mechanism — every format renders,
+every number traces to a `ScanResult` field or a documented constant, and
+the full path (`ingest → static → rank → gate → verify → report`) has
+now been exercised end-to-end against real code, not just fixtures.
+`PROVISIONAL` for the actual figures a report contains, for the same
+reason Phase 5's gate numbers are provisional (§6): the ranker is still
+trained on the simulated corpus. A generated report is honest about this
+today — the PDF cover carries the same provisional banner `codegate
+info` already prints — but the *numbers themselves* will change, not
+just become more confident, once Phase 8 retrains.
+
+### Phase 9 — `NOT STARTED`
+
+Demo assets (`examples/vulnerable_app/`) are planned but not yet built.
+See the plan file for the current design.
 
 ## 4 · Decision log
 
@@ -606,6 +732,15 @@ Chronological, including reversals. Each entry: what changed, and why.
   flagged below: one CLI invocation over a whole target directory,
   exercised by `test_scan_pipeline.py` against real files on disk, not
   just per-snippet in-memory strings
+- `codegate scan` end-to-end (`terminal`/`json`/`sarif`/`pdf`) — verified
+  by hand against the real committed `data/model/` artifacts and the
+  repo's own `src/` tree: correct counts, valid JSON/SARIF, a real PDF
+  opened and visually inspected page by page, not just checked for a
+  byte signature. This hand-testing (not the unit suite) is what caught
+  two real bugs — see the Phase 7 entry's decision list (rich
+  markup/line-wrapping corrupting JSON stdout, and a Unicode-ellipsis
+  mojibake in the findings table) — both fixed before this line was
+  written
 
 **Needs integration testing — built and unit-tested, not yet exercised
 end-to-end:**
@@ -630,15 +765,9 @@ end-to-end:**
   simulated run, including the one now committed at `data/model/` —
   correctly labeled `is_provisional: true`
 
-**Not started:** Phases 7, 9 (PDF reporting, demo assets).
-`codegate scan` (the CLI command) still reports itself as not
-implemented (see Phase 3 entry above) — the underlying engine
-(`scan.pipeline.run_scan`, Phase 5) and the verifier
-(`scan.verifier.verify_unit`, Phase 6) both exist and are tested, but
-neither is wired into the CLI yet because there is no report formatter
-for any of `terminal`/`json`/`sarif`/`pdf` to hand their output to; that
-wiring lands alongside Phase 7, once there's something real to format the findings
-into.
+**Not started:** Phase 9 (demo assets, `examples/vulnerable_app/`).
+Everything else through Phase 7 is built, tested, and wired end to end —
+`codegate scan` is a real command now, not a stub.
 
 ## 6 · Building ahead of the trained model — the evidence
 
@@ -680,19 +809,21 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-134 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+176 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 verified this session).
 
 | File | Tests | Protects |
 |---|---|---|
 | `test_oracles.py` | 21 | Core oracle contracts: `function_exists`, sandbox execution/timeout/exit-code capture, SQLi/cmdi/creds detection on fixtures, consensus rule (all four branches), semgrep hit/clear on fixtures |
+| `test_scan_pipeline.py` | 15 | `Finding` source validation, semgrep-to-function mapping, the no-execution invariant, gate partitioning, full escalation under an uncertified threshold, skipped-file reporting, actionable missing-model error, verifier confirming/clearing/failing an escalated unit, cache reuse across scans, token/call accounting for auto-approved and freshly-verified units, `calibration` pass-through, no-verifier backward compatibility |
 | `test_oracle_robustness.py` | 15 | The SQLi table-name abstention-defect class specifically — parametrized over 7+ table names, plus the sink-shortcut correctness tests |
+| `test_verifier.py` | 14 | JSON verdict parsing (clean/embedded-in-prose/malformed/missing-field/unrecognized-CWE), no-backend and backend-exception degradation, unparseable-response non-caching, cache write and cache-hit-skips-backend, `Finding` mapping incl. lineno fallback, `build_verifier_backend`'s key-present/absent branches and role-to-model-id mapping |
+| `test_cli.py` | 13 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate + provisional banner, version-guard surfaced through the CLI, invalid `--format` rejection, `--alpha` rejection, real `scan` runs across `terminal`/`json`/`sarif`/`pdf`, JSON/PDF written to `--output`, end-to-end `calibrate` artifact write |
 | `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
+| `test_report_pdf.py` | 10 | Pygments-to-reportlab-markup highlighting (keyword coloring, indentation, XML escaping), excerpt extraction around a line, a real generated PDF's byte signature and size, zero-findings/no-certificate/missing-source-file/missing-output-dir edge cases |
 | `test_ingest.py` | 9 | Function/method/nested-function extraction, lineno/hash correctness, hash stability, syntax-error and unreadable-file reporting, `venv` skip, `.gitignore` honoring, missing-path error |
 | `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
-| `test_verifier.py` | 14 | JSON verdict parsing (clean/embedded-in-prose/malformed/missing-field/unrecognized-CWE), no-backend and backend-exception degradation, unparseable-response non-caching, cache write and cache-hit-skips-backend, `Finding` mapping incl. lineno fallback, `build_verifier_backend`'s key-present/absent branches and role-to-model-id mapping |
-| `test_scan_pipeline.py` | 7 | `Finding` source validation, semgrep-to-function mapping, the no-execution invariant (sentinel-file proof), gate partitioning under a permissive threshold, full escalation under an uncertified threshold, skipped-file reporting, actionable missing-model error |
-| `test_cli.py` | 7 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate + provisional banner, version-guard surfaced through the CLI, invalid `--format` rejection, `scan`'s not-implemented exit code, end-to-end `calibrate` artifact write |
+| `test_report_json_sarif.py` | 6 | JSON round-trips with correct counts, null certificate when unscored, SARIF 2.1.0 shape, severity-to-SARIF-level mapping, POSIX-path locations, one rule per tracked CWE plus UNSPECIFIED |
 | `test_generation_resume.py` | 6 | Checkpoint write/read, resume-skips-completed, partial-failure doesn't abort the batch |
 | `test_corpus.py` | 6 | Prompt bank loading, prompt/flavor/split shape |
 | `test_risk.py` | 5 | `empirical_risk`, Clopper-Pearson interval edge cases |
@@ -701,6 +832,9 @@ verified this session).
 | `test_schemas.py` | 4 | `validate_dataframe` catches missing/extra columns and dtype mismatches |
 | `test_eval.py` | 4 | Cost-coverage frontier computation, generator-shift experiment |
 | `test_config.py` | 4 | Config loading, role-reuse (adjudicator-in-generators) rejection, split-ratio validation |
+| `test_report_terminal.py` | 4 | No-findings message, per-finding row rendering, provisional-certificate banner, certificate section omitted when unscored |
+| `test_report_accounting.py` | 5 | Zero LLM activity yields zero cost, per-call system-prompt overhead added correctly, calls-avoided combines auto-approved and cache hits, known-vs-unknown model pricing, always flagged as an estimate |
+| `test_report_remediation.py` | 3 | Correct hardcoded entry for each tracked CWE, manual-review fallback for `UNSPECIFIED` and for unrecognized input |
 | `test_env.py` | 3 | `.env` loading, required-vs-optional variable handling |
 | `test_dry_run.py` | 1 | Full simulated pipeline runs end-to-end without raising, and produces every artifact including `model.joblib`/`calibration.json` with the correct provisional flags |
 
@@ -726,3 +860,18 @@ verified this session).
   under one pytest session, not a pipeline logic bug — no code change
   made. Worth watching if it recurs; not yet worth a retry/backoff
   mechanism on a single observation.
+- **No live Groq API call has ever been made.** `GroqVerifierBackend` is
+  exercised only against stub backends in tests; whether the real
+  endpoint's auth, rate limits, and JSON discipline actually match what
+  `_parse_verdict` expects is unverified until someone runs
+  `codegate scan` with a real `GROQ_API_KEY` set. Low risk given
+  `verify_unit`'s degrade-to-`None` design (a surprising real response
+  becomes "needs review," not a crash), but the cost/token numbers in a
+  report generated under a live key haven't been sanity-checked against
+  an actual bill yet.
+- **The Groq price table (`report/accounting.py`) is a hand-maintained
+  constant checked once (2026-08-31).** If it goes stale, every report's
+  `estimated_cost_usd` quietly drifts from reality — there's no
+  freshness check or expiry warning on the price itself, only the
+  existing `is_estimate` flag covering the token-count side of the
+  estimate.

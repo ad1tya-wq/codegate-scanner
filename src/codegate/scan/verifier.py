@@ -140,6 +140,16 @@ def _cache_path(cache_dir: Path, content_hash: str) -> Path:
     return cache_dir / f"{content_hash}.json"
 
 
+def is_cached(content_hash: str, cache_dir: Path = DEFAULT_CACHE_DIR) -> bool:
+    """
+    Whether `verify_unit` would resolve this content_hash without a fresh
+    LLM call. Exposed so callers (report/accounting.py) can count cache
+    hits vs. fresh calls for the token/cost savings estimate without
+    duplicating the cache's file-naming scheme.
+    """
+    return _cache_path(cache_dir, content_hash).exists()
+
+
 def _load_cached(cache_dir: Path, content_hash: str) -> VerifierResult | None:
     path = _cache_path(cache_dir, content_hash)
     if not path.exists():

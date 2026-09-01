@@ -801,18 +801,37 @@ written.
 this is "re-run the research path" from the CLI rather than a standalone
 script.
 
-#### `scan(path, format="terminal", output=None, no_llm=False, alpha=None) -> None`
-**Does:** Validates `--format` against `{pdf, json, sarif, terminal}` and
-exits 1 on an invalid value. Otherwise prints an explicit "not
-implemented yet" message naming which phases (4-7) it's waiting on, and
-exits 2 -- deliberately not a silent no-op or a crash, so a fresh-clone
-user gets an honest answer rather than a traceback. Its full argument
-surface (`--format`, `--output`, `--no-llm`, `--alpha`) is already fixed
-so Phase 5-7 land as an implementation swap, not a CLI redesign.
-**Talks to:** Nothing yet -- no callees until ingest (Phase 4) exists.
+#### `scan(path, format="terminal", output=None, no_llm=False, alpha=None, model_dir=DEFAULT_MODEL_DIR, config=Path("config.yaml")) -> None` (Phase 7)
+**Does:** The real scan command. Validates `--format` (exit 1 if
+invalid) and rejects `--alpha` outright (exit 2, with an explanation --
+see `report/`'s Phase 7 entry below for why an override can't just be
+applied post hoc). Unless `--no-llm`, tries to load `config.yaml` for
+`cfg.verifier` and build a verifier backend via
+`scan/verifier.py::build_verifier_backend` -- a missing `config.yaml`
+degrades to no LLM verification rather than erroring, since a scan
+target outside this repo won't have one. Calls
+`scan/pipeline.py::run_scan`, then dispatches to the requested
+formatter: `render_terminal` prints directly; `to_json`/`to_sarif` print
+to stdout via plain `print()` (not `console.print()` -- see below) or
+write to `--output`; `generate_pdf` always writes a file (`--output` or
+`codegate_report.pdf`).
+**Talks to:** Calls `load_config`, `scan/verifier.py::build_verifier_backend`,
+`scan/pipeline.py::run_scan`, and one of
+`report/terminal.py::render_terminal`, `report/json_sarif.py::to_json`/
+`to_sarif`, `report/pdf.py::generate_pdf`.
 **Tech:** `typer`.
-**Fits in:** ONLINE -- the command this whole project is building toward;
-currently a scaffold with an honest status message, not a working scanner.
+**Fits in:** ONLINE -- the command this whole project is building toward,
+now a real, tested, end-to-end scanner rather than a scaffold.
+
+**A real bug caught only by running the actual CLI, not the test suite:**
+`console.print(json_text)` looked correct and passed under `CliRunner`,
+but against a real terminal `rich` line-wraps at terminal width and
+parses `[...]` as markup -- both of which corrupt JSON. Fixed by using
+plain `print()` for JSON/SARIF stdout output; `console.print` stays for
+`terminal` format and for `Wrote <path>` status lines. See
+`docs/ENGINEERING_LOG.md`'s Phase 7 entry for the second bug this same
+hand-testing pass caught (a Unicode-ellipsis mojibake in
+`report/terminal.py`'s findings table).
 
 **Canonical artifact location established this phase:**
 `data/model/model.joblib` + `data/model/calibration.json` -- not
@@ -940,17 +959,25 @@ detection-attribution table (semgrep vs. model-escalated vs.
 LLM-confirmed vs. auto-approved) possible — designed in now rather than
 retrofitted later.
 **Talks to:** Constructed by `scan/pipeline.py::_semgrep_findings` and
-`_rank_and_gate`. Will be constructed by `scan/verifier.py` (Phase 6,
-`source="verifier"`) and consumed by every `report/` module (Phase 7).
+`_needs_review_finding` (`source="model"`), and by
+`scan/verifier.py::to_finding` via `_resolve_escalated`
+(`source="verifier"`, Phase 7). Consumed by every `report/` module.
 **Tech:** stdlib `dataclasses`.
 **Fits in:** ONLINE — the common currency of the whole scan pipeline.
 
 #### `ScanResult` (frozen dataclass, `scan/pipeline.py`)
 **Does:** The return value of `run_scan`: `findings: list[Finding]`,
-`n_units`, `n_auto_approved`, `n_escalated`, `skipped: list[SkippedFile]`
-(passed through from ingest).
-**Talks to:** Returned by `run_scan`. Will be the direct input to every
-`report/` formatter (Phase 7).
+`n_units`, `n_auto_approved`, `n_escalated`, `skipped: list[SkippedFile]`,
+plus (Phase 7) `n_verified_confirmed/cleared/unresolved`,
+`n_verifier_cache_hits`, `n_verifier_calls_made`, `tokens_saved`,
+`tokens_spent`, and `calibration: Calibration | None` -- the certificate
+this scan actually ran under. All Phase 7 fields default to `0`/`None`,
+so `verifier=None` scans (Phase 5's original behavior) construct the
+same `ScanResult` shape they always did.
+**Talks to:** Returned by `run_scan`. Direct input to every `report/`
+formatter: `report/terminal.py`, `report/json_sarif.py`,
+`report/pdf.py` all read it, and `report/accounting.py::compute_cost_summary`
+reads the token/call fields specifically.
 **Fits in:** ONLINE.
 
 #### `_base_rule_id(rule_id) -> str`
@@ -990,17 +1017,23 @@ any test that adds a rule without updating the map.
 `_base_rule_id`, `_map_to_unit`. Called by `run_scan`.
 **Fits in:** ONLINE — the static pre-pass stage.
 
-#### `_rank_and_gate(units, model_dir) -> tuple[list[Finding], int, int]`
+#### `_rank_and_gate(units, model_dir) -> tuple[list[tuple[Unit, float]], int, int, Calibration | None]`
 **Does:** Loads `model.joblib` + `calibration.json` via
 `research/artifacts.py::load_artifacts`, scores every unit with
 `R2Ranker.score`, then applies the certified gate: `score >= t_hat` →
-auto-approved (no `Finding` emitted — the certificate is what stands
-behind that unit's safety, not a report line); otherwise escalated as a
-`Finding` with `source="model"`, `cwe="UNSPECIFIED"`, `severity="REVIEW"`,
-`confidence=1 - score`. `calib.t_hat is None` (uncertified) escalates
-every unit — the gate's documented behavior when calibration couldn't
-certify any threshold at all. Returns `([], 0, 0)` immediately for an
-empty unit list rather than loading the model at all.
+auto-approved (no `Finding` emitted here — the certificate is what
+stands behind that unit's safety, not a report line); otherwise
+returned as an escalated `(unit, score)` pair for the caller to decide
+what happens next. `calib.t_hat is None` (uncertified) escalates every
+unit. Also returns the auto-approved units' summed `token_estimate`
+(Phase 7's savings baseline) and the loaded `Calibration` itself (`None`
+for an empty `units` list, since nothing gets loaded in that case) so
+the report can render the certificate the scan actually ran under.
+Returns `([], 0, 0, None)` immediately for an empty unit list. **Changed
+in Phase 7**: previously built the "needs review" `Finding` directly and
+returned `n_escalated` as a bare count; now returns the raw
+`(unit, score)` pairs so `_resolve_escalated` (Phase 7) can attempt LLM
+verification before any `Finding` is constructed.
 **Talks to:** Calls `research/artifacts.py::load_artifacts`,
 `ranker/r2_embedding_lr.py::R2Ranker.score`. Called by `run_scan`. Its
 `FileNotFoundError` (no trained model) propagates up with
@@ -1010,23 +1043,68 @@ as `cli.py::info`.
 **Fits in:** ONLINE — the rank + gate stages, and the only place
 `model.joblib`/`calibration.json` are read from the scan side.
 
-#### `run_scan(path, model_dir=DEFAULT_MODEL_DIR) -> ScanResult`
+#### `_needs_review_finding(unit, score) -> Finding` (Phase 7)
+**Does:** Builds the `source="model"`, `cwe="UNSPECIFIED"`,
+`severity="REVIEW"`, `confidence=1-score` finding for an escalated unit
+that the verifier either wasn't asked about (no backend) or couldn't
+resolve. This is the exact `Finding` Phase 5 used to build inline inside
+`_rank_and_gate`; factored out so both the no-verifier and
+verifier-but-unresolved paths in `_resolve_escalated` share one
+implementation.
+**Talks to:** Called by `_resolve_escalated`.
+**Fits in:** ONLINE.
+
+#### `_VerificationTally` (frozen dataclass, Phase 7)
+**Does:** `_resolve_escalated`'s return shape: `findings`, `n_confirmed`,
+`n_cleared`, `n_unresolved`, `n_cache_hits`, `n_calls_made`,
+`tokens_saved`, `tokens_spent`. A named dataclass rather than an 8-tuple
+so the call site (`run_scan`) reads by field name, not position.
+**Talks to:** Constructed and returned by `_resolve_escalated`; unpacked
+by `run_scan` to populate `ScanResult`.
+**Fits in:** ONLINE.
+
+#### `_resolve_escalated(escalated, verifier, cache_dir) -> _VerificationTally` (Phase 7)
+**Does:** Attempts to resolve every `(unit, score)` pair from
+`_rank_and_gate` with the verifier. `verifier=None` -> every unit falls
+back to `_needs_review_finding`, all counts stay 0 -- bit-for-bit Phase
+5's original behavior. Otherwise, per unit: checks
+`scan/verifier.py::is_cached` first (for accounting), then calls
+`verify_unit`. `None` result -> `_needs_review_finding` (unresolved).
+`result.vulnerable` -> `scan/verifier.py::to_finding` (confirmed, tagged
+`source="verifier"`). Otherwise -> no finding at all (cleared, same
+convention as an auto-approved unit). Token accounting: a cache miss's
+`unit.token_estimate` goes to `tokens_spent` (the API call itself costs
+money regardless of whether the response parses); a cache hit's goes to
+`tokens_saved`.
+**Talks to:** Calls `scan/verifier.py::is_cached`, `verify_unit`,
+`to_finding`, and this module's own `_needs_review_finding`. Called by
+`run_scan`.
+**Fits in:** ONLINE — the join point between Phase 5's gate and Phase
+6's verifier, built when Phase 7 gave the result somewhere to go.
+
+#### `run_scan(path, model_dir=DEFAULT_MODEL_DIR, verifier=None, cache_dir=DEFAULT_CACHE_DIR) -> ScanResult`
 **Does:** The public entry point: `ingest_path(path)` →
-`_semgrep_findings` → `_rank_and_gate`, findings from both stages merged
-and sorted by `(file, line)`. **Hard invariant, stated in the docstring
-and proven by test:** nothing on this path imports or calls
-`oracles/sandbox.py`, `sqli_oracle.py`, or `cmdi_oracle.py` — those
-detonation oracles execute code specifically to judge LLM-generated
-training samples under controlled conditions; `run_scan` scans arbitrary
-user code, and executing it would be the scanner exceeding its mandate.
+`_semgrep_findings` → `_rank_and_gate` → `_resolve_escalated`, findings
+from both stages merged and sorted by `(file, line)`. **Hard invariant,
+stated in the docstring and proven by test:** nothing on this path
+imports or calls `oracles/sandbox.py`, `sqli_oracle.py`, or
+`cmdi_oracle.py` — those detonation oracles execute code specifically to
+judge LLM-generated training samples under controlled conditions;
+`run_scan` scans arbitrary user code, and executing it would be the
+scanner exceeding its mandate. `verifier=None` (the default) reproduces
+Phase 5's exact behavior byte-for-byte — every Phase 5 test still passes
+unmodified after Phase 7's changes.
 **Talks to:** Calls `scan/ingest.py::ingest_path`, `_semgrep_findings`,
-`_rank_and_gate`. Will be called by `cli.py::scan` once Phase 7 gives it
-a report formatter to hand results to.
+`_rank_and_gate`, `_resolve_escalated`. Called by `cli.py::scan` (Phase 7).
 **Fits in:** ONLINE — the whole scan pipeline in one call.
 
-**Verified against the repo's own `src/` tree**: 70 units, 62
-auto-approved, 8 escalated, 0 semgrep findings (command run this
-session). Proven not to execute scanned code via a sentinel-file test
+**Verified against the repo's own `src/` tree**: 104 units, 87
+auto-approved, 17 escalated, 17 findings via the real installed
+`codegate` CLI (`codegate scan src --no-llm` and all four `--format`
+values), not just `run_scan` called directly — see
+`docs/ENGINEERING_LOG.md`'s Phase 7 entry for what that hand-testing
+caught that the unit suite didn't. Proven not to execute scanned code
+via a sentinel-file test
 (`tests/test_scan_pipeline.py::test_scan_never_executes_the_scanned_code`).
 
 ---
@@ -1101,8 +1179,19 @@ a scan. `_save_cache` only ever gets called with an already-validated
 **Talks to:** Called by `verify_unit`.
 **Tech:** stdlib `json`, `pathlib`, `dataclasses.asdict`.
 **Fits in:** ONLINE — the mechanism behind the project's "re-scanning
-unchanged code costs zero calls" claim (Phase 7's accounting will read
-cache hits vs. misses for the savings estimate).
+unchanged code costs zero calls" claim (`report/accounting.py`, Phase 7,
+reads cache hits vs. fresh calls for the savings estimate).
+
+#### `is_cached(content_hash, cache_dir=DEFAULT_CACHE_DIR) -> bool` (Phase 7)
+**Does:** Whether `verify_unit` would resolve this `content_hash`
+without a fresh LLM call -- a thin wrapper over `_cache_path(...).exists()`.
+Exposed as public API (not left as an internal `_` helper) specifically
+so `scan/pipeline.py::_resolve_escalated` can count cache hits vs. fresh
+calls for accounting without duplicating the cache's file-naming scheme.
+**Talks to:** Called by `scan/pipeline.py::_resolve_escalated`, once per
+escalated unit, immediately before `verify_unit`.
+**Fits in:** ONLINE — the accounting-side complement to `verify_unit`'s
+own internal cache check.
 
 #### `verify_unit(unit, backend, cache_dir=DEFAULT_CACHE_DIR) -> VerifierResult | None`
 **Does:** The public entry point: cache hit → return it, no call made;
@@ -1112,8 +1201,8 @@ response fails `_parse_verdict` → `None`, and nothing is cached; a valid
 verdict is cached and returned. Every `None` path means "still needs
 review" to the caller — never "confirmed safe."
 **Talks to:** Calls `_load_cached`, `backend.ask`, `_parse_verdict`,
-`_save_cache`. Will be called once per escalated unit by `scan/pipeline.py`
-or `cli.py::scan` once Phase 7 wires the verifier into the scan flow.
+`_save_cache`. Called once per escalated unit by
+`scan/pipeline.py::_resolve_escalated` (Phase 7).
 **Fits in:** ONLINE — resolves what Phase 5's gate could only escalate.
 
 #### `to_finding(unit, result) -> Finding`
@@ -1136,10 +1225,170 @@ Phase 6 entry, "needs integration testing."
 
 ---
 
+## `report/` — turning a ScanResult into something a human reads (Phase 7)
+
+Five modules, none containing any LLM-written prose. Every sentence in
+every formatter is hand-written; every number traces back to a
+`ScanResult` field or a documented constant.
+
+### `report/remediation.py`
+
+#### `Remediation` (frozen dataclass)
+**Does:** `cwe`, `title`, `explanation`, `before` (vulnerable code
+sample), `after` (fixed code sample).
+**Talks to:** Constructed by `_REMEDIATIONS`/`_DEFAULT`; returned by
+`get_remediation`.
+**Fits in:** ONLINE.
+
+#### `get_remediation(cwe) -> Remediation`
+**Does:** Looks up the hardcoded remediation for `cwe` in `_REMEDIATIONS`
+(one hand-written entry each for CWE-89, CWE-78, CWE-798 -- explanation
+plus a before/after code pair). Falls back to `_DEFAULT` (a generic
+"needs manual review" entry, no code samples) for `"UNSPECIFIED"` or any
+other unrecognized value -- never raises, since every finding a report
+lists needs a remediation section, confirmed or not.
+**Talks to:** Called by `report/pdf.py::_findings_flowables` and
+`report/json_sarif.py::to_sarif` (for its SARIF rule descriptions --
+one source of truth for the CWE explanation text, not duplicated).
+**Fits in:** ONLINE — the "no LLM writes remediation prose" guarantee,
+concretely.
+
+### `report/accounting.py`
+
+#### `CostSummary` (frozen dataclass)
+**Does:** `tokens_saved`, `tokens_spent`, `calls_avoided`, `calls_made`,
+`estimated_cost_usd`, `price_per_million_tokens_usd`, `is_estimate`
+(always `True` today -- a real field a renderer must read, not a
+docstring note it could silently drop).
+**Talks to:** Returned by `compute_cost_summary`; read by every `report/`
+formatter's cost section.
+**Fits in:** ONLINE.
+
+#### `compute_cost_summary(result, verifier_model=None) -> CostSummary`
+**Does:** Turns `ScanResult`'s raw counts into a priced summary.
+`tokens_spent` = `result.tokens_spent` (the chars/4 estimate for
+freshly-verified units, from `scan/pipeline.py::_resolve_escalated`)
+plus a fixed 150-token system-prompt overhead per call actually made
+(`result.n_verifier_calls_made`). `calls_avoided` = auto-approved +
+cache hits. Price comes from `_PRICE_PER_MILLION_TOKENS_USD` (hand
+-maintained, checked 2026-08-31), falling back to a default rather than
+raising for an unrecognized model name.
+**Talks to:** Reads `ScanResult` fields directly. Called by every
+`report/` formatter that shows a cost figure.
+**Tech:** plain dict lookup, no external pricing API.
+**Fits in:** ONLINE — deliberately not live-priced, so a report stays
+reproducible from the numbers it was generated with.
+
+### `report/json_sarif.py`
+
+#### `to_json(result, target, verifier_model=None) -> str`
+**Does:** CodeGate's own JSON report shape (not a third-party schema):
+`codegate_version`, `target`, `scanned_at`, a `summary` dict, a
+`certificate` dict (or `null` when `result.calibration is None`), a
+`cost` dict from `CostSummary`, the full `findings` list, and
+`skipped_files`. `json.dumps(..., indent=2)`.
+**Talks to:** Calls `report/accounting.py::compute_cost_summary`. Called
+by `cli.py::scan` for `--format json`.
+**Fits in:** ONLINE.
+
+#### `to_sarif(result, target) -> str`
+**Does:** SARIF 2.1.0 -- the format GitHub code scanning and most CI
+security tooling consume. One `rules` entry per tracked CWE plus
+`UNSPECIFIED`, descriptions pulled from `report/remediation.py::get_remediation`
+so the explanation text has one source of truth. Each finding becomes a
+`results` entry with `ruleId`, a `level` (`error`/`warning`/`note`,
+mapped from `Finding.severity` via `_SARIF_LEVEL`, defaulting to
+`"warning"` for anything unrecognized), a message, and a
+`physicalLocation` using a POSIX-style relative path
+(`Path(f.file).as_posix()`) and `max(f.line, 1)` as the start line.
+**Talks to:** Calls `report/remediation.py::get_remediation`. Called by
+`cli.py::scan` for `--format sarif`.
+**Fits in:** ONLINE.
+
+### `report/terminal.py`
+
+#### `render_terminal(result, target, console, verifier_model=None) -> None`
+**Does:** The default `codegate scan` output. Prints a summary table
+(units/auto-approved/escalated/findings/skipped), a findings table (one
+row per finding, every column `overflow="fold"` rather than rich's
+default ellipsis truncation -- see the mojibake note in `cli.py::scan`'s
+entry above), the certificate (if `result.calibration is not None`,
+including the `PROVISIONAL` banner), and a one-line LLM
+calls-made/avoided/estimated-cost summary.
+**Talks to:** Calls `report/accounting.py::compute_cost_summary`. Called
+by `cli.py::scan` for `--format terminal` (the default).
+**Tech:** `rich.console.Console`, `rich.table.Table`.
+**Fits in:** ONLINE.
+
+### `report/pdf.py`
+
+The major deliverable: a 7-section PDF (cover, executive summary,
+detection attribution, cost & token accounting, findings detail,
+coverage & certificate, methodology) with syntax-highlighted code
+excerpts. Deterministic layout via reportlab Platypus flowables.
+
+#### `_highlight(code) -> str`
+**Does:** Lexes `code` with `pygments.lex(code, PythonLexer())` and
+turns each token into reportlab Paragraph markup -- a restricted XML
+subset (`<font color="...">`, `<br/>`), not full HTML, since that's what
+`Paragraph` actually accepts. Maps a small hand-picked set of token-type
+prefixes (Keyword, Name.Builtin, String, Number, Comment, Operator) to
+hex colors via `_TOKEN_COLORS`; leading indentation is preserved as
+`&nbsp;` runs since `Paragraph` collapses plain whitespace; text is
+XML-escaped before wrapping.
+**Talks to:** Called by `_findings_flowables` for both the finding
+excerpt and each remediation's before/after samples.
+**Tech:** `pygments.lex`, `pygments.token`, `xml.sax.saxutils.escape`.
+**Fits in:** ONLINE.
+
+#### `_read_excerpt(file, line, context=3) -> tuple[str, int]`
+**Does:** Reads `file` from disk and returns the lines around `line`
+(±`context`) plus the excerpt's first line number. Returns `("", 0)` --
+never raises -- if the file can't be read, since the scanned source may
+have moved or changed between the scan and the report render.
+**Talks to:** Called by `_findings_flowables`.
+**Fits in:** ONLINE -- the PDF-only reason `Finding`/`ScanResult` don't
+need to carry source text themselves: the report reads it back from disk
+at render time, in the same process, same invocation.
+
+#### `_cover_flowables`, `_executive_summary_flowables`, `_attribution_flowables`, `_cost_flowables`, `_findings_flowables`, `_certificate_flowables`, `_methodology_flowables`
+**Does:** One function per report section, each returning a list of
+reportlab flowables (`Paragraph`, `Table`, `Spacer`, ...). Attribution
+counts findings by `source`; cost renders `CostSummary` plus the
+"these are estimates" disclaimer paragraph; findings detail combines
+`_read_excerpt` + `_highlight` + `report/remediation.py::get_remediation`
+per finding; certificate renders `result.calibration` (or a "nothing to
+certify" message when `None`) plus the `PROVISIONAL` banner when
+applicable; methodology is fully static hand-written text (scope,
+threat model, CWE list).
+**Talks to:** Called by `generate_pdf`, in document order.
+**Fits in:** ONLINE.
+
+#### `generate_pdf(result, target, output_path, verifier_model=None) -> Path`
+**Does:** Builds the full flowable list from every section function
+above and renders it via `reportlab.platypus.SimpleDocTemplate.build`.
+Creates `output_path`'s parent directories if needed. Returns
+`output_path`.
+**Talks to:** Calls every `_*_flowables` function and
+`report/accounting.py::compute_cost_summary`. Called by `cli.py::scan`
+for `--format pdf`.
+**Tech:** `reportlab.platypus`, `reportlab.lib`.
+**Fits in:** ONLINE.
+
+**Verified:** 42 new tests across `test_report_remediation.py` (3),
+`test_report_accounting.py` (5), `test_report_json_sarif.py` (6),
+`test_report_pdf.py` (10, including a real generated PDF's `%PDF-`
+byte signature), `test_report_terminal.py` (4), plus 14 changed/added
+tests in `test_scan_pipeline.py` and 6 in `test_cli.py`. Also hand
+-verified against the repo's own `src/` tree via the real installed
+`codegate` CLI across all four `--format` values, including opening and
+visually inspecting the generated PDF -- see `docs/ENGINEERING_LOG.md`'s
+Phase 7 entry for the two bugs that hand-testing caught and the unit
+suite didn't.
+
+---
+
 ## Not yet written
 
-Phases 7 and 9 will each add a section here, in the same commit as the
-code:
-- **Phase 7** — `report/pdf.py`, `report/remediation.py`,
-  `report/accounting.py`, `report/json_sarif.py`
+Phase 9 will add a section here, in the same commit as the code:
 - **Phase 9** — `examples/vulnerable_app/` (demo assets, not library code)

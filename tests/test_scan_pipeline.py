@@ -128,3 +128,156 @@ def test_scan_without_a_trained_model_raises_actionable_error(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="codegate calibrate"):
         run_scan(target, model_dir=tmp_path / "no_such_model_dir")
+
+
+class _StubVerifier:
+    def __init__(self, response: str):
+        self.response = response
+        self.calls = 0
+
+    def ask(self, code: str) -> str:
+        self.calls += 1
+        return self.response
+
+
+def test_scan_with_verifier_confirming_vulnerable_emits_a_verifier_finding(tmp_path):
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    _write_model_dir(model_dir, t_hat=None)  # escalate everything
+
+    verifier = _StubVerifier(
+        '{"vulnerable": true, "cwe": "CWE-89", "line": 1, "reason": "x", "fix_hint": "y"}'
+    )
+    result = run_scan(target, model_dir=model_dir, verifier=verifier, cache_dir=tmp_path / "cache")
+
+    assert result.n_verified_confirmed == 1
+    assert result.n_verified_cleared == 0
+    assert result.n_verified_unresolved == 0
+    verifier_findings = [f for f in result.findings if f.source == "verifier"]
+    assert len(verifier_findings) == 1
+    assert verifier_findings[0].cwe == "CWE-89"
+
+
+def test_scan_with_verifier_clearing_a_unit_produces_no_finding_for_it(tmp_path):
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    _write_model_dir(model_dir, t_hat=None)
+
+    verifier = _StubVerifier(
+        '{"vulnerable": false, "cwe": null, "line": null, "reason": "fine", "fix_hint": ""}'
+    )
+    result = run_scan(target, model_dir=model_dir, verifier=verifier, cache_dir=tmp_path / "cache")
+
+    assert result.n_verified_cleared == 1
+    assert result.n_verified_confirmed == 0
+    assert len(result.findings) == 0
+
+
+def test_scan_with_verifier_that_fails_falls_back_to_needs_review(tmp_path):
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    _write_model_dir(model_dir, t_hat=None)
+
+    verifier = _StubVerifier("not json")
+    result = run_scan(target, model_dir=model_dir, verifier=verifier, cache_dir=tmp_path / "cache")
+
+    assert result.n_verified_unresolved == 1
+    model_findings = [f for f in result.findings if f.source == "model"]
+    assert len(model_findings) == 1
+
+
+def test_scan_reuses_the_verifier_cache_across_scans(tmp_path):
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    _write_model_dir(model_dir, t_hat=None)
+    cache_dir = tmp_path / "cache"
+
+    verifier = _StubVerifier(
+        '{"vulnerable": true, "cwe": "CWE-89", "line": 1, "reason": "x", "fix_hint": "y"}'
+    )
+    first = run_scan(target, model_dir=model_dir, verifier=verifier, cache_dir=cache_dir)
+    second = run_scan(target, model_dir=model_dir, verifier=verifier, cache_dir=cache_dir)
+
+    assert verifier.calls == 1  # second scan served entirely from cache
+    assert first.n_verifier_cache_hits == 0
+    assert second.n_verifier_cache_hits == 1
+
+
+def test_scan_accounts_tokens_saved_for_auto_approved_units(tmp_path):
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    _write_model_dir(model_dir, t_hat=0.0)  # everything auto-approved, nothing escalated
+
+    result = run_scan(target, model_dir=model_dir)
+    assert result.n_auto_approved == 1
+    assert result.tokens_saved > 0
+    assert result.tokens_spent == 0
+
+
+def test_scan_accounts_tokens_spent_for_a_fresh_verifier_call(tmp_path):
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    _write_model_dir(model_dir, t_hat=None)
+
+    verifier = _StubVerifier(
+        '{"vulnerable": true, "cwe": "CWE-89", "line": 1, "reason": "x", "fix_hint": "y"}'
+    )
+    result = run_scan(target, model_dir=model_dir, verifier=verifier, cache_dir=tmp_path / "cache")
+    assert result.n_verifier_calls_made == 1
+    assert result.tokens_spent > 0
+
+
+def test_scan_result_carries_the_calibration_it_ran_under(tmp_path):
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    _write_model_dir(model_dir, t_hat=0.5)
+
+    result = run_scan(target, model_dir=model_dir)
+    assert result.calibration is not None
+    assert result.calibration.t_hat == 0.5
+    assert result.calibration.corpus_version == "simulated-v2"
+
+
+def test_scan_without_a_verifier_behaves_exactly_as_before(tmp_path):
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    _write_model_dir(model_dir, t_hat=None)
+
+    result = run_scan(target, model_dir=model_dir)  # verifier defaults to None
+    assert result.n_verified_confirmed == 0
+    assert result.n_verified_cleared == 0
+    assert result.n_verified_unresolved == 0
+    model_findings = [f for f in result.findings if f.source == "model"]
+    assert len(model_findings) == 1

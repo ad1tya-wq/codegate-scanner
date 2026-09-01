@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -67,10 +68,83 @@ def test_scan_rejects_invalid_format(tmp_path):
     assert "--format" in result.output
 
 
-def test_scan_reports_not_implemented(tmp_path):
-    result = runner.invoke(app, ["scan", str(tmp_path)])
+def _scan_target(tmp_path: Path) -> Path:
+    target = tmp_path / "app"
+    target.mkdir()
+    (target / "safe.py").write_text("def add(a, b):\n    return a + b\n")
+    return target
+
+
+def test_scan_alpha_override_is_not_implemented(tmp_path):
+    result = runner.invoke(app, ["scan", str(tmp_path), "--alpha", "0.1"])
     assert result.exit_code == 2
     assert "not implemented" in result.output
+
+
+def test_scan_without_a_trained_model_exits_nonzero_with_actionable_message(tmp_path):
+    target = _scan_target(tmp_path)
+    result = runner.invoke(
+        app, ["scan", str(target), "--model-dir", str(tmp_path / "missing"), "--no-llm"]
+    )
+    assert result.exit_code == 1
+    assert "codegate calibrate" in result.output
+
+
+def test_scan_terminal_format_prints_a_summary(tmp_path):
+    _write_fake_artifacts(tmp_path, is_provisional=True)
+    target = _scan_target(tmp_path)
+    result = runner.invoke(app, ["scan", str(target), "--model-dir", str(tmp_path), "--no-llm"])
+    assert result.exit_code == 0, result.output
+    assert "CodeGate scan" in result.output
+
+
+def test_scan_json_format_prints_valid_json(tmp_path):
+    _write_fake_artifacts(tmp_path, is_provisional=True)
+    target = _scan_target(tmp_path)
+    result = runner.invoke(
+        app, ["scan", str(target), "--model-dir", str(tmp_path), "--format", "json", "--no-llm"]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "findings" in payload
+    assert payload["certificate"]["corpus_version"] == "simulated-v2"
+
+
+def test_scan_sarif_format_prints_valid_sarif(tmp_path):
+    _write_fake_artifacts(tmp_path, is_provisional=True)
+    target = _scan_target(tmp_path)
+    result = runner.invoke(
+        app, ["scan", str(target), "--model-dir", str(tmp_path), "--format", "sarif", "--no-llm"]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["version"] == "2.1.0"
+
+
+def test_scan_json_format_with_output_writes_a_file_instead_of_stdout(tmp_path):
+    _write_fake_artifacts(tmp_path, is_provisional=True)
+    target = _scan_target(tmp_path)
+    out = tmp_path / "report.json"
+    result = runner.invoke(
+        app,
+        ["scan", str(target), "--model-dir", str(tmp_path), "--format", "json", "--output", str(out), "--no-llm"],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    json.loads(out.read_text())  # valid JSON on disk
+
+
+def test_scan_pdf_format_writes_a_real_pdf(tmp_path):
+    _write_fake_artifacts(tmp_path, is_provisional=True)
+    target = _scan_target(tmp_path)
+    out = tmp_path / "report.pdf"
+    result = runner.invoke(
+        app,
+        ["scan", str(target), "--model-dir", str(tmp_path), "--format", "pdf", "--output", str(out), "--no-llm"],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.exists()
+    assert out.read_bytes()[:5] == b"%PDF-"
 
 
 def test_calibrate_writes_model_and_calibration(tmp_path):
