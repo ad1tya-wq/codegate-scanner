@@ -57,7 +57,14 @@ def test_check_sqli_clears_safe_fixture():
 
 
 def test_check_sqli_returns_none_when_function_missing():
-    assert check_sqli("def other(): pass", function_name="get_user") is None
+    # The snippet touches SQL (so the no-sink shortcut correctly declines to
+    # call it safe) but defines no function under the name we were asked to
+    # invoke -- no verdict is reachable, so the oracle must abstain.
+    sql_touching = (
+        "def other(conn, name):\n"
+        "    return conn.execute(\"SELECT * FROM users WHERE col = '\" + name + \"'\")\n"
+    )
+    assert check_sqli(sql_touching, function_name="get_user") is None
 
 
 def test_check_cmdi_detects_vulnerable_fixture():

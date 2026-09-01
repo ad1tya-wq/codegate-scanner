@@ -35,12 +35,12 @@ class Backend(ABC):
 _SIM_TEMPLATES: dict[tuple[str, str], list[str]] = {
     ("CWE-89", "vulnerable"): [
         "def {fn}(conn, {arg}):\n"
-        "    query = \"SELECT * FROM t WHERE col = '\" + {arg} + \"'\"\n"
+        "    query = \"SELECT * FROM users WHERE col = '\" + {arg} + \"'\"\n"
         "    return conn.execute(query).fetchall()\n",
     ],
     ("CWE-89", "near_miss"): [
         "def {fn}(conn, {arg}):\n"
-        "    return conn.execute(\"SELECT * FROM t WHERE col = ?\", ({arg},)).fetchall()\n",
+        "    return conn.execute(\"SELECT * FROM users WHERE col = ?\", ({arg},)).fetchall()\n",
     ],
     ("CWE-89", "neutral"): [
         "def {fn}({arg}):\n"

@@ -16,3 +16,4 @@ data/runs/*
 .coverage
 htmlcov/
 *.log
+logs/

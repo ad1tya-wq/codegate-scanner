@@ -6,6 +6,24 @@ from codegate.oracles.ast_utils import function_exists
 from codegate.oracles.sandbox import run_sandboxed
 
 
+_SHELL_SINK_MARKERS = (
+    "subprocess", "os.system", "os.popen", "os.exec", "os.spawn",
+    "commands.", "pty.spawn", "shell=true",
+)
+
+
+def has_shell_sink(code: str) -> bool:
+    """
+    Cheap scope check: could this code plausibly invoke a shell or process?
+
+    Same rationale as sqli_oracle.has_sql_sink -- a function that never
+    spawns a process cannot contain command injection, so it is confidently
+    safe rather than unjudgeable. Over-inclusive on purpose.
+    """
+    lowered = code.lower()
+    return any(marker in lowered for marker in _SHELL_SINK_MARKERS)
+
+
 def check_cmdi(code: str, function_name: str) -> bool | None:
     """
     Returns True if a shell-metacharacter payload causes a sentinel file to
@@ -20,6 +38,9 @@ def check_cmdi(code: str, function_name: str) -> bool | None:
     sh backgrounds the first command and runs the second immediately after
     -- both cause the sentinel-creating echo to run either way.
     """
+    if not has_shell_sink(code):
+        return False  # no process invocation anywhere: confidently safe
+
     if not function_exists(code, function_name):
         return None
 

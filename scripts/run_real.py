@@ -1,88 +1,127 @@
 #!/usr/bin/env python
 """
-End-to-end CodeGate run on REAL LLM backends (Ollama / OpenRouter / Groq),
-sharing the exact same pipeline logic as scripts/run_pipeline_dry_run.py
-(see codegate.pipeline.run_full_pipeline) -- generation, oracle labeling,
-consensus, ranking, LTT calibration, cost-coverage frontier, generator-shift
-experiment.
+Generate and label the real corpus using open models served by Ollama.
 
-Requires:
-- A .env file at the repo root (copy .env.example) with OPENROUTER_API_KEY,
-  GROQ_API_KEY -- see NEEDS_FROM_YOU.md section 1.
-- Ollama running locally with `qwen2.5-coder:7b` pulled, for the
-  qwen2.5-coder-7b generator.
+Every generator in config.yaml is served by a single Ollama host, so this
+runs with ZERO API keys and zero cost. The host may be this machine or a
+teammate's -- set OLLAMA_BASE_URL in .env to point at it.
 
-Does NOT yet call semgrep or an LLM adjudicator during labeling (semgrep is
-too slow per-row at corpus scale -- see NEEDS_FROM_YOU.md -- and the
-adjudicator's GeminiBackend integration is untested against the live API).
-Does NOT implement the escalation-time LLM verifier call (architecture step
-5: "confirm/deny" on samples the gate doesn't auto-approve) -- only the
-gate's threshold/coverage computation is built. Both are the next pieces
-once this script has been run once for real and those gaps are worth
-closing.
+See docs/OLLAMA_SETUP.md for the full two-machine setup.
+
+    python scripts/run_real.py --limit 5 --out-dir data/runs/smoke   # smoke test
+    python scripts/run_real.py --out-dir data/runs/real_540          # full run
+
+The run checkpoints after every sample, so it is safe to interrupt and
+rerun the same command -- it resumes rather than starting over.
 """
 from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codegate.config import load_config, CodeGateConfig
+from codegate.env import get_env
 from codegate.research.corpus.prompts import load_prompt_bank
-from codegate.env import require_env
-from codegate.research.generation.backends import Backend, OllamaBackend, OpenRouterBackend, GroqBackend
+from codegate.research.generation.backends import Backend, OllamaBackend
 from codegate.research.pipeline import run_full_pipeline
 
-# Maps each config.yaml generator name to how to build its real Backend.
-# OpenRouter model slugs are best-effort as of 2026-08-28 and unverified
-# against the live API (no key was available to test with tonight) --
-# check https://openrouter.ai/models before relying on them; if a slug is
-# wrong, OpenRouterBackend.generate() will raise on the first real call
-# with an HTTP error naming the bad model, not silently misbehave.
-def _build_backends(cfg: CodeGateConfig) -> dict[str, Backend]:
-    backends: dict[str, Backend] = {}
-    for name in cfg.generators:
-        if name == "qwen2.5-coder-7b":
-            backends[name] = OllamaBackend(model="qwen2.5-coder:7b")
-        elif name == "deepseek-coder":
-            backends[name] = OpenRouterBackend(model="deepseek/deepseek-coder", api_key=require_env("OPENROUTER_API_KEY"))
-        elif name == "llama-3.3-70b":
-            backends[name] = GroqBackend(model="llama-3.3-70b-versatile", api_key=require_env("GROQ_API_KEY"))
-        elif name == "codestral":
-            backends[name] = OpenRouterBackend(model="mistralai/codestral-2501", api_key=require_env("OPENROUTER_API_KEY"))
-        else:
-            raise ValueError(
-                f"No real-backend mapping for generator '{name}' in config.yaml -- "
-                f"add a branch to _build_backends() in scripts/run_real.py."
-            )
-    return backends
+DEFAULT_OLLAMA_URL = "http://localhost:11434"
+
+
+def preflight(base_url: str, wanted_models: list[str]) -> None:
+    """
+    Fail fast and legibly if the Ollama host is unreachable or missing a
+    model. Without this the run dies hours in, or silently produces garbage.
+    """
+    tags_url = f"{base_url.rstrip('/')}/api/tags"
+    try:
+        resp = requests.get(tags_url, timeout=10)
+        resp.raise_for_status()
+    except requests.exceptions.ConnectTimeout:
+        raise SystemExit(
+            f"\nERROR: timed out connecting to Ollama at {base_url}\n"
+            f"  Most likely the host's firewall is blocking port 11434.\n"
+            f"  See docs/OLLAMA_SETUP.md step 4.\n"
+        )
+    except requests.exceptions.ConnectionError:
+        raise SystemExit(
+            f"\nERROR: could not connect to Ollama at {base_url}\n"
+            f"  Most likely OLLAMA_HOST is still bound to localhost on the host\n"
+            f"  machine, or Ollama was not fully quit and relaunched after the\n"
+            f"  change. See docs/OLLAMA_SETUP.md step 3.\n"
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise SystemExit(f"\nERROR: Ollama preflight failed at {base_url}: {exc}\n")
+
+    available = {m["name"] for m in resp.json().get("models", [])}
+    # Ollama reports "qwen2.5-coder:7b"; tolerate a bare name matching any tag.
+    missing = [
+        m for m in wanted_models
+        if m not in available and not any(a.split(":")[0] == m.split(":")[0] for a in available)
+    ]
+    if missing:
+        raise SystemExit(
+            f"\nERROR: Ollama at {base_url} is missing model(s): {missing}\n"
+            f"  Available: {sorted(available) or '(none)'}\n"
+            f"  Ask the host to run:  ollama pull {missing[0]}\n"
+            f"  Or edit config.yaml's `generators` to match what they actually pulled\n"
+            f"  (smaller :1.5b / :3b variants are fine -- see docs/OLLAMA_SETUP.md step 2).\n"
+        )
+
+    print(f"[preflight] Ollama reachable at {base_url}; all {len(wanted_models)} models present")
+
+
+def build_backends(cfg: CodeGateConfig, base_url: str) -> dict[str, Backend]:
+    """Every configured generator is an Ollama model on the same host."""
+    return {name: OllamaBackend(model=name, base_url=base_url) for name in cfg.generators}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--out-dir", default="data/runs/real_run")
+    parser.add_argument("--out-dir", default="data/runs/real_540")
     parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Only use the first N prompts (for smoke tests)")
+    parser.add_argument("--base-url", default=None,
+                        help="Ollama host URL; overrides OLLAMA_BASE_URL")
+    parser.add_argument("--skip-preflight", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    base_url = args.base_url or get_env("OLLAMA_BASE_URL", DEFAULT_OLLAMA_URL)
+
+    if not args.skip_preflight:
+        preflight(base_url, cfg.generators)
+
     prompts = load_prompt_bank(cfg.prompts_dir)
+    if args.limit is not None:
+        prompts = prompts[: args.limit]
     print(f"Loaded {len(prompts)} prompts across {len(cfg.cwes)} CWEs")
 
-    backends = _build_backends(cfg)
-    print(f"Built {len(backends)} real backends: {list(backends.keys())}")
+    backends = build_backends(cfg, base_url)
+    total = len(prompts) * len(backends) * cfg.samples_per_prompt
+    print(f"Generators: {list(backends)}")
+    print(f"Planned samples: {total}  (resumable -- safe to interrupt and rerun)")
 
+    out_dir = Path(args.out_dir)
     summary = run_full_pipeline(
-        cfg, prompts, backends, is_simulated=False, out_dir=Path(args.out_dir),
+        cfg, prompts, backends,
+        is_simulated=False,
+        out_dir=out_dir,
         use_semgrep_and_adjudicator=True,
+        checkpoint_path=out_dir / "generations.checkpoint.jsonl",
     )
 
     print("\n=== CODEGATE REAL RUN SUMMARY ===")
-    print(f"Snippets generated : {summary['n_generated']} (REAL LLM output)")
+    print(f"Snippets generated : {summary['n_generated']} (REAL model output)")
     print(f"Vulnerable rate    : {summary['vuln_rate']:.2%}")
     print(f"Calibration n_vuln : {summary['n_vuln_calib']}")
     print(f"Shift experiments  : {summary['n_shift_experiments']} generator(s) held out")
-    print(f"Artifacts written  : {args.out_dir}")
+    print(f"Artifacts written  : {out_dir}")
     return 0
 
 

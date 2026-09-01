@@ -13,6 +13,7 @@ from codegate.oracles.cmdi_oracle import check_cmdi
 from codegate.oracles.creds_oracle import check_creds
 from codegate.oracles.consensus import consensus_label, CONSENSUS_RULE_VERSION
 from codegate.ranker.r2_embedding_lr import R2Ranker
+from codegate.gate.ltt import calibrate_threshold
 from codegate.research.eval.frontier import compute_frontier
 from codegate.research.eval.shift import run_shift_experiment
 from codegate.research.eval.plots import plot_frontier, plot_shift_results
@@ -24,6 +25,14 @@ from codegate.schemas import validate_dataframe
 # name" case by trying an AST scan for the *first* top-level function
 # defined, which is what a real model's output will actually look like.
 _SIM_CANDIDATE_FN_NAMES = ["handler", "process", "run_task", "do_work"]
+
+# Label vocabulary. 1 = vulnerable, 0 = safe, -1 = the oracle abstained.
+# Abstention is a distinct third state on purpose: collapsing it into "safe"
+# is a silent-failure path that corrupts both the trained ranker and the
+# conformal certificate that depends on those labels.
+LABEL_VULNERABLE = 1
+LABEL_SAFE = 0
+LABEL_ABSTAIN = -1
 
 
 def _first_function_name(code: str) -> str | None:
@@ -41,15 +50,14 @@ def _first_function_name(code: str) -> str | None:
 def label_row(row: pd.Series, use_semgrep_and_adjudicator: bool = False) -> dict:
     """
     Runs the appropriate oracle(s) for one generated snippet and applies the
-    consensus rule. `use_semgrep_and_adjudicator=False` (the default, used
-    by the simulated dry run) skips the semgrep + LLM-adjudicator calls --
-    semgrep is too slow to call per-row at corpus scale (see
-    NEEDS_FROM_YOU.md) and the adjudicator needs an API key -- and falls
-    back to "no evidence of vulnerability" (label 0) when the dynamic/static
-    oracle itself has no verdict, rather than blocking. Real runs
-    (`use_semgrep_and_adjudicator=True`) are expected to always get a
-    dynamic/static verdict since real generators reliably define *some*
-    function; if that stops being true this flag is where to revisit it.
+    consensus rule, returning one `labeled` row.
+
+    `use_semgrep_and_adjudicator=False` (the default, used by the simulated
+    dry run) skips the semgrep call, which is too slow to invoke per-row at
+    corpus scale. Real runs pass True.
+
+    Returns LABEL_ABSTAIN when no oracle reached a verdict. Callers must
+    exclude those rows rather than treating them as safe.
     """
     code = row["code"]
     cwe = row["cwe"]
@@ -86,7 +94,13 @@ def label_row(row: pd.Series, use_semgrep_and_adjudicator: bool = False) -> dict
         # adjudicator call is wired in -- see NEEDS_FROM_YOU.md item 1.
 
     if dynamic_verdict is None and static_verdict is None:
-        label = 0
+        # The oracle could not reach a verdict (function not found, timeout,
+        # harness error). This is NOT evidence of safety. Recording it as 0
+        # silently poisons the corpus and biases the certificate in the
+        # flattering direction -- it is what hid the CWE-89 table-name bug,
+        # where 540/540 samples abstained and every one was labelled safe.
+        # LABEL_ABSTAIN is excluded from training and calibration upstream.
+        label = LABEL_ABSTAIN
     else:
         label = consensus_label(cwe, semgrep_hit, dynamic_verdict, static_verdict, adjudicator_verdict)
 
@@ -109,6 +123,7 @@ def run_full_pipeline(
     is_simulated: bool,
     out_dir: Path,
     use_semgrep_and_adjudicator: bool = False,
+    checkpoint_path: Path | None = None,
 ) -> dict:
     """
     Generation -> oracle labeling -> consensus -> R2 ranking -> LTT
@@ -116,11 +131,19 @@ def run_full_pipeline(
     Writes every intermediate artifact to `out_dir` and returns a summary
     dict. Shared by scripts/run_pipeline_dry_run.py (SimulatedBackend) and
     scripts/run_real.py (real backends) so the two never drift apart.
+
+    `checkpoint_path` makes generation resumable -- essential for the
+    multi-hour Ollama runs, harmless for the simulated dry run.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     summary: dict = {}
 
-    gen_df = run_generation(prompts, backends, samples_per_prompt=cfg.samples_per_prompt, is_simulated=is_simulated)
+    gen_df = run_generation(
+        prompts, backends,
+        samples_per_prompt=cfg.samples_per_prompt,
+        is_simulated=is_simulated,
+        checkpoint_path=checkpoint_path,
+    )
     validate_dataframe(gen_df, "generations")
     gen_df.to_parquet(out_dir / "generations.parquet")
     summary["n_generated"] = len(gen_df)
@@ -132,11 +155,30 @@ def run_full_pipeline(
     ]
     labeled_df = pd.DataFrame(labeled_rows)
     labeled_df.to_parquet(out_dir / "labeled.parquet")
-    vuln_rate = labeled_df["label"].mean()
-    summary["vuln_rate"] = float(vuln_rate)
-    print(f"Labeled {len(labeled_df)} snippets; overall vulnerable rate = {vuln_rate:.2%}")
+
+    # Abstentions are excluded from every downstream statistic. Reporting a
+    # vulnerable rate over rows the oracle never actually judged would be
+    # meaningless, and calibrating on them would invalidate the certificate.
+    n_abstain = int((labeled_df["label"] == LABEL_ABSTAIN).sum())
+    decided = labeled_df[labeled_df["label"] != LABEL_ABSTAIN]
+    vuln_rate = float(decided["label"].mean()) if len(decided) else float("nan")
+    summary["vuln_rate"] = vuln_rate
+    summary["n_abstain"] = n_abstain
+    print(
+        f"Labeled {len(labeled_df)} snippets; {len(decided)} decided, "
+        f"{n_abstain} abstained ({n_abstain / max(len(labeled_df), 1):.1%}); "
+        f"vulnerable rate among decided = {vuln_rate:.2%}"
+    )
+    if n_abstain > 0.2 * len(labeled_df):
+        print(
+            f"[warn] {n_abstain}/{len(labeled_df)} oracle abstentions is high. "
+            f"The oracle is likely failing to invoke the generated functions "
+            f"(wrong entry-point name, or a fixture mismatch such as an "
+            f"unexpected SQL table name) rather than genuinely finding them safe."
+        )
 
     merged = gen_df.merge(labeled_df[["sample_id", "label"]], on="sample_id")
+    merged = merged[merged["label"] != LABEL_ABSTAIN].reset_index(drop=True)
 
     train_mask = merged["split"] == "train"
     ranker = R2Ranker(random_seed=cfg.random_seed)
@@ -154,10 +196,24 @@ def run_full_pipeline(
     print(f"Calibration set: {len(calib_labels)} samples, {n_vuln_calib} vulnerable")
 
     if n_vuln_calib > 0:
-        frontier_df = compute_frontier(calib_scores, calib_labels, alphas=[0.05, 0.1, 0.2, 0.3], delta=0.1)
+        # alpha/delta come from config.yaml -- they are the project's stated
+        # statistical contract and must not be hardcoded here. The sweep
+        # brackets the configured alpha so the frontier shows the trade-off
+        # around the operating point actually being certified.
+        alphas = sorted({cfg.alpha, 0.05, 0.10, 0.20, 0.30})
+        frontier_df = compute_frontier(calib_scores, calib_labels, alphas=alphas, delta=cfg.delta)
         frontier_df.to_csv(out_dir / "frontier.csv", index=False)
         plot_frontier(frontier_df, str(out_dir / "frontier.png"))
         print(frontier_df.to_string(index=False))
+
+        # Persist the threshold-search trace at the configured operating
+        # point: it is the evidence behind t_hat, and a reviewer will ask.
+        operating = calibrate_threshold(calib_scores, calib_labels, alpha=cfg.alpha, delta=cfg.delta)
+        pd.DataFrame(
+            operating.trace, columns=["threshold", "k_vuln_auto_approved", "p_value", "certified"]
+        ).to_csv(out_dir / "ltt_trace.csv", index=False)
+        summary["t_hat"] = operating.t_hat
+        summary["coverage"] = operating.coverage
     else:
         pd.DataFrame({"alpha": [], "t_hat": [], "coverage": [], "n_vuln_calib": []}).to_csv(
             out_dir / "frontier.csv", index=False
@@ -175,7 +231,9 @@ def run_full_pipeline(
     if len(scores_by_gen) >= 2 and n_vuln_calib > 0:
         for held_out in scores_by_gen:
             try:
-                r = run_shift_experiment(scores_by_gen, labels_by_gen, held_out, alpha=0.2, delta=0.1)
+                r = run_shift_experiment(
+                    scores_by_gen, labels_by_gen, held_out, alpha=cfg.alpha, delta=cfg.delta
+                )
                 shift_results.append(r)
             except ValueError as e:
                 print(f"skipping shift experiment for {held_out}: {e}")

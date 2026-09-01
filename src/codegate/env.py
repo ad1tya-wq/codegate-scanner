@@ -15,6 +15,16 @@ def _ensure_env_loaded() -> None:
     _loaded = True
 
 
+def get_env(name: str, default: str) -> str:
+    """
+    Returns environment variable `name`, loading `.env` first if present,
+    falling back to `default`. For optional settings -- use `require_env`
+    when the value has no sensible default and absence should stop the run.
+    """
+    _ensure_env_loaded()
+    return os.environ.get(name) or default
+
+
 def require_env(name: str) -> str:
     """
     Returns the value of environment variable `name`, loading `.env` (repo

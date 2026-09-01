@@ -15,17 +15,25 @@ flavors:
 
 # Generator roles — see spec §"Generator roles". Never reuse a model across roles
 # except the simulator, which is exempt (is_simulated=True everywhere).
+#
+# All four are served by a single Ollama host (see docs/OLLAMA_SETUP.md), so the
+# whole corpus runs with zero API keys and zero cost. These are Ollama model tags
+# and must match what `ollama list` reports on the host — if the host pulled the
+# smaller variants (:1.5b, :1.3b, :3b) to fit in RAM, change these to match.
 generators:
-  - qwen2.5-coder-7b     # local via Ollama
-  - deepseek-coder       # OpenRouter free tier
-  - llama-3.3-70b        # Groq free tier
-  - codestral            # Mistral free tier
+  - qwen2.5-coder:7b
+  - deepseek-coder:6.7b
+  - codellama:7b
+  - starcoder2:7b
 
-adjudicator: gemini-flash   # label adjudicator — not a generator
+adjudicator: gemini-flash   # label adjudicator — not a generator.
+                            # Not required for the Ollama corpus run: the dynamic
+                            # oracles are authoritative for CWE-89/78 and the static
+                            # oracle for CWE-798, so consensus never needs its vote.
 verifier: llama-3.3-70b-groq # escalation verifier — pre-registered, disclosed overlap w/ generator role
 
-samples_per_prompt: 3       # k
-prompts_per_cwe: 60
+samples_per_prompt: 1       # k — 135 prompts x 4 generators x 1 = 540 samples (~2-5h on CPU)
+prompts_per_cwe: 15         # actual count in data/prompts/ (target for a full run is 60)
 split_ratios: {train: 0.4, calib: 0.3, test: 0.3}
 
 paths:
