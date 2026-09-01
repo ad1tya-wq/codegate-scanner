@@ -176,10 +176,10 @@ flowchart TD
     G --> H{"GROQ_API_KEY set<br/>and not --no-llm?"}
     H -->|yes| I["VERIFY<br/>1 LLM call, cached by content hash"]
     H -->|no| J["needs review"]
-    I -->|confirmed| K[finding: source=verifier]
-    I -->|cleared| L[no finding]
+    I -->|confirmed| K["finding: source=verifier"]
+    I -->|cleared| L["no finding"]
     I -->|unresolved| J
-    C --> M[finding: source=semgrep]
+    C --> M["finding: source=semgrep"]
 
     F --> N["REPORT<br/>terminal / json / sarif / pdf"]
     J --> N
