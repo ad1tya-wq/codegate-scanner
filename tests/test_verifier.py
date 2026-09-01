@@ -130,5 +130,5 @@ def test_build_verifier_backend_maps_role_name_to_real_model_id(monkeypatch):
     env_module._loaded = True
     backend = build_verifier_backend("llama-3.3-70b-groq")
     assert isinstance(backend, GroqVerifierBackend)
-    assert backend._model == "llama-3.3-70b-versatile"
+    assert backend._model == "openai/gpt-oss-120b"
     assert backend._api_key == "test-key"

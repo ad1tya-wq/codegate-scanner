@@ -17,8 +17,16 @@ DEFAULT_CACHE_DIR = Path(".codegate_cache")
 # model string an API expects. Maps known role names to the real Groq
 # model id -- kept as an explicit table (not a guess baked into the
 # backend) so a future model rename is a one-line change here.
+#
+# llama-3.3-70b-versatile (the model this role name originally pointed to)
+# was removed from Groq's catalog at some point after the plan was
+# written -- confirmed empirically 2026-09-02: a live call 404'd, and
+# GET /openai/v1/models no longer lists it for this account at all.
+# openai/gpt-oss-120b is Groq's current large open-weight chat model and
+# was verified live the same session to return clean, correctly-classified
+# JSON on a real vulnerable-code sample.
 _GROQ_MODEL_IDS = {
-    "llama-3.3-70b-groq": "llama-3.3-70b-versatile",
+    "llama-3.3-70b-groq": "openai/gpt-oss-120b",
 }
 
 _SYSTEM_PROMPT = (

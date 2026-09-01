@@ -32,3 +32,7 @@ logs/
 # tied to whatever code a user last scanned locally -- never meant to be
 # committed.
 .codegate_cache/
+
+# scripts/run_eval.py's output. Fully regenerable from data/model/ +
+# examples/vulnerable_app/ -- same convention as data/runs/* above.
+data/eval/

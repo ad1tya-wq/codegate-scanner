@@ -29,12 +29,13 @@ Four status labels are used throughout:
 | 3 | Packaging + CLI (`info`, `calibrate` solid; `scan` scaffolded) | SOLID (`info`/`calibrate`) / NOT STARTED (`scan` — Phase 4-7 dependency) | `e1dbff4` | 104 passed |
 | 4 | Ingest (`scan/ingest.py`) | SOLID | `2bbdd2c` | 113 passed |
 | 5 | Scan pipeline (`scan/pipeline.py`, `scan/findings.py`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, per §6) | `0861a16` | 120 passed |
-| 6 | LLM verifier (`scan/verifier.py`) | SOLID (mechanism, unit-tested) / NEEDS INTEGRATION (no live Groq key exercised yet) | `ca0f368` | 134 passed |
+| 6 | LLM verifier (`scan/verifier.py`) | SOLID (live-verified 2026-09-02, see decision #11) | `ca0f368` | 134 passed |
 | 7 | Reporting + CLI wiring (`report/`, `codegate scan`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, cost estimates, per §6) | — | 176 passed |
 | 9 | Demo assets (`examples/vulnerable_app/`) | SOLID | — | 177 passed |
+| — | Evaluation & metrics (`research/eval/metrics.py`, `scripts/run_eval.py`) | SOLID (mechanism) / PROVISIONAL (ranker-quality numbers, per §6) | — | 187 passed |
 | 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
 
-Current test suite: **177 passed**, 0 failed, ~230s wall clock
+Current test suite: **187 passed**, 0 failed, ~390s wall clock
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -485,7 +486,7 @@ scanned code. The *numbers* the model-gate half produces
 per §6 until Phase 8's retrain, exactly as G1/G2 require; nothing in this
 phase's tests or evidence treats those numbers as meaningful yet.
 
-### Phase 6 — LLM verifier (`scan/verifier.py`) — `SOLID` (mechanism) / `NEEDS INTEGRATION` (live key)
+### Phase 6 — LLM verifier (`scan/verifier.py`) — `SOLID`
 
 **What was done.** Added `verify_unit(unit, backend, cache_dir)`: one
 constrained LLM call per escalated unit, asking the model to return a
@@ -511,10 +512,13 @@ finding, same as an auto-approved unit.
   spirit, just not the literal ABC.
 - **`verifier: llama-3.3-70b-groq` (config.yaml) is a role name, not a
   literal API model id.** `_GROQ_MODEL_IDS` maps it to the real Groq
-  model string (`llama-3.3-70b-versatile`) explicitly, rather than
-  passing the config value straight through and hoping it happens to
-  match the provider's naming — a wrong guess here would silently 404
-  every verification call.
+  model string explicitly, rather than passing the config value
+  straight through and hoping it happens to match the provider's
+  naming — a wrong guess here would silently 404 every verification
+  call. This exact scenario happened for real: see decision #11 (§4) --
+  the model this mapping originally pointed to
+  (`llama-3.3-70b-versatile`) was later removed from Groq's catalog
+  entirely, and only the mapping needed to change, not any call site.
 - **No key → `build_verifier_backend` returns `None`, not an error.**
   Matches the project's existing degrade-without-keys discipline
   (`consensus.py`'s adjudicator-optional design, Phase 3's `codegate
@@ -545,16 +549,19 @@ cached), cache write on success, cache hit skipping a second backend call
 `build_verifier_backend`'s no-key/with-key branches including the
 role-name-to-model-id mapping. 134 tests passing (was 120).
 
-**Status rationale.** `SOLID` for the mechanism — parsing, caching, and
-degradation are all exercised against a stub backend, and every failure
-mode (no key, network error, bad JSON, wrong shape) has a dedicated test
-proving it degrades to "needs review" rather than crashing or lying.
-`NEEDS INTEGRATION` because no test has exercised a live Groq API call —
-`GroqVerifierBackend.ask` itself is untested against the real endpoint,
-same caveat Phase 0/1's confidence assessment already carries for
-`OllamaBackend`/`OpenRouterBackend` (§5). Not wired into `run_scan` yet —
-that lands with Phase 7, alongside the CLI wiring and report formatter
-`scan.pipeline`'s escalated findings will need to be handed to.
+**Status rationale.** `SOLID` — parsing, caching, and degradation are
+all exercised against a stub backend in the unit suite, and every
+failure mode (no key, network error, bad JSON, wrong shape) has a
+dedicated test proving it degrades to "needs review" rather than
+crashing or lying. **Updated 2026-09-02, live-verified**: the original
+verifier model (`llama-3.3-70b-versatile`) turned out to have been
+removed from Groq's catalog — see decision #11 (§4) — and once remapped
+to `openai/gpt-oss-120b`, a real `GROQ_API_KEY` run against
+`examples/vulnerable_app` correctly confirmed both real vulnerabilities
+and cleared all three of the gate's false positives, with zero
+unresolved calls. `GroqVerifierBackend.ask` is no longer untested
+against the real endpoint. (Wiring into `run_scan` itself landed with
+Phase 7, alongside the CLI wiring and report formatter its output needed.)
 
 ### Phase 7 — Reporting + CLI wiring (`report/`, `codegate scan`) — `SOLID` (mechanism) / `PROVISIONAL` (numbers)
 
@@ -602,12 +609,16 @@ a report existed to hand it to.
   constants, not measurements, printed as assumptions in the PDF's cost
   section. This matches the plan's explicit instruction: "Label it an
   estimate and print the assumptions in the report."
-- **A hardcoded Groq price
-  (`$0.59`/1M tokens for `llama-3.3-70b-versatile`, checked 2026-08-31)
-  in a plain dict, not a live pricing API call.** A report must be
-  reproducible from the numbers it was run with; a price that can change
-  between generating a report and reading it would make the report lie
-  about its own recent past.
+- **A hardcoded Groq price (`$0.59`/1M tokens) in a plain dict, not a
+  live pricing API call.** A report must be reproducible from the
+  numbers it was run with; a price that can change between generating a
+  report and reading it would make the report lie about its own recent
+  past. The price itself is carried over from the model this table
+  originally priced (`llama-3.3-70b-versatile`, since removed from
+  Groq's catalog — see decision #11) and is explicitly **not yet
+  verified** against real pricing for the replacement model
+  (`openai/gpt-oss-120b`) — flagged in `report/accounting.py`'s own
+  comment, not silently assumed correct.
 - **`--alpha` explicitly rejected (exit code 2), not silently ignored.**
   Overriding the certified threshold post hoc would require recomputing
   it from the persisted `LTTResult.trace` against a real frontier —
@@ -767,6 +778,7 @@ Chronological, including reversals. Each entry: what changed, and why.
 | 8 | Both-machines-on-one-LAN Ollama setup (Appendix A) → **host-runs-everything, ships back one file (`docs/OLLAMA_SETUP.md`)** | The two machines involved in Track A do not share Wi-Fi; running the whole generation step locally on the host and shipping `generations.parquet` back removes every networking variable (firewall rules, `OLLAMA_HOST` binding, LAN reachability) at the cost of the host needing Python + the repo, not just Ollama |
 | 9 | Corpus scale: 1,620 samples (3 per prompt) → **540 (1 per prompt)** | Keeps the unattended Track A run to ~2–5h on CPU; scaling up is deferred until the first 540-sample loop proves out end to end |
 | 10 | `cli.py`'s eager `from codegate.research.pipeline import run_full_pipeline` → **lazy-imported inside `calibrate()`**; `semgrep` moved from the `research` optional extra → **core `dependencies`** | Found while setting up CI (§9): `research/pipeline.py` imports `research/eval/plots.py`, which imports `matplotlib` unconditionally — a dependency declared only under `[research]`. Because `cli.py` imported `run_full_pipeline` at module top level, *every* `codegate` command, including `scan`, crashed with `ModuleNotFoundError` on a plain `pip install -e .` (no extras) — directly breaking the project's own "fresh clone works with zero setup" promise and the plan's clean-room acceptance criterion. `semgrep` had the milder version of the same problem: `scan/pipeline.py`'s static pre-pass needs it, but it lived under `research` too, so a base install would silently produce zero static findings with no warning. Verified the fix in a fresh venv: `pip install -e .` (base only) followed by `codegate info` and `codegate scan examples/vulnerable_app --no-llm --format pdf` both now succeed |
+| 11 | Verifier model `llama-3.3-70b-versatile` → **`openai/gpt-oss-120b`** (`scan/verifier.py::_GROQ_MODEL_IDS`) | Found live, 2026-09-02, the first time `GROQ_API_KEY` was ever set and a real scan ran with the verifier on: every call 404'd. `GET /openai/v1/models` against the same key confirmed the model is no longer in Groq's catalog at all — deprecated/removed with no in-band warning. `verify_unit`'s degrade-to-`None` design meant this failed safely (findings fell back to "needs review," no crash), but verification was silently non-functional until diagnosed with a direct API probe. Fixed by remapping to `openai/gpt-oss-120b`, verified live on a real vulnerable-code sample (clean, correctly-classified JSON on the first call) and then end-to-end: re-scanning `examples/vulnerable_app` with the verifier enabled correctly confirmed both real vulnerabilities and cleared all three of the provisional model's false positives (precision 0.50 → 1.00 on that target). Also found and fixed the actual cause of the confusion along the way: `.env` had a second, empty `GROQ_API_KEY=` line after the real one, which `python-dotenv` was resolving to (last value wins on a duplicate key) — the key was correctly set by the user throughout, dotenv was just reading the wrong line |
 
 ## 5 · Confidence assessment
 
@@ -786,6 +798,11 @@ Chronological, including reversals. Each entry: what changed, and why.
 - CLI (`info`, `calibrate`) — end-to-end verified both by test and by hand
   against the real `data/model/` artifacts, which reproduced the exact
   numbers already on record in section 6
+- LLM verifier (`scan/verifier.py`), live — a real `GROQ_API_KEY` run
+  against `examples/vulnerable_app` correctly confirmed both real
+  vulnerabilities and cleared all three of the gate's false positives on
+  that target (precision 0.50 → 1.00), zero unresolved calls, after
+  decision #11's model remap
 - Ingest (`scan/ingest.py`) — verified against synthetic edge cases and
   against the repo's own `src/` tree (62 units, 0 skipped)
 - Scan pipeline (`scan/pipeline.py`) — ingest → static → rank → gate
@@ -816,10 +833,6 @@ end-to-end:**
 - `GeminiBackend` and the adjudicator path — implemented, never called
   once; `label_row`'s `adjudicator_verdict` stays hardcoded `False` until
   it is wired in
-- `GroqVerifierBackend.ask()` against the real Groq endpoint — every
-  Phase 6 test exercises `verify_unit`/`_parse_verdict` against a stub
-  backend; the actual HTTP call, auth header, and real model's JSON
-  discipline are unverified until a live `GROQ_API_KEY` run happens
 
 **Provisional — runs, but the output shouldn't be trusted yet:**
 - Every score the interim `R2Ranker` produces (trained on 540 simulated,
@@ -875,7 +888,7 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-177 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+187 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 verified this session).
 
 | File | Tests | Protects |
@@ -887,6 +900,7 @@ verified this session).
 | `test_cli.py` | 13 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate + provisional banner, version-guard surfaced through the CLI, invalid `--format` rejection, `--alpha` rejection, real `scan` runs across `terminal`/`json`/`sarif`/`pdf`, JSON/PDF written to `--output`, end-to-end `calibrate` artifact write |
 | `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
 | `test_report_pdf.py` | 11 | Pygments-to-reportlab-markup highlighting (keyword coloring, indentation, XML escaping), excerpt extraction around a line, the `"<module>"`-func-name escaping regression (Phase 9), a real generated PDF's byte signature and size, zero-findings/no-certificate/missing-source-file/missing-output-dir edge cases |
+| `test_eval_metrics.py` | 10 | Oracle accuracy against real fixtures, corpus label distribution by CWE/outcome, score-frame joining and abstention-dropping, separation metrics on well-separated and deliberately-inverted synthetic scores, `scan_ground_truth_eval` precision/recall/F1/accuracy incl. same-unit-multiple-findings and module-level-finding cases |
 | `test_ingest.py` | 9 | Function/method/nested-function extraction, lineno/hash correctness, hash stability, syntax-error and unreadable-file reporting, `venv` skip, `.gitignore` honoring, missing-path error |
 | `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
 | `test_report_json_sarif.py` | 6 | JSON round-trips with correct counts, null certificate when unscored, SARIF 2.1.0 shape, severity-to-SARIF-level mapping, POSIX-path locations, one rule per tracked CWE plus UNSPECIFIED |
@@ -994,3 +1008,97 @@ nothing in the test suite is Windows-specific *except* the cmdi payload
 separator already handled per-OS in the oracle itself — see decision
 #7), and no coverage gate (no coverage baseline has been established to
 gate against yet).
+
+## 10 · Evaluation & metrics
+
+`src/codegate/research/eval/metrics.py` (new) plus five new plotting
+functions in `research/eval/plots.py`, orchestrated by
+`scripts/run_eval.py` (new). Every function computes something real and
+inspectable today; every one is designed to run unchanged once Track A's
+real corpus replaces the simulated one at `data/model/` — only the input
+files change, not the code.
+
+**What's computed:**
+
+- **`oracle_accuracy_on_fixtures`** — the three ground-truth oracles
+  (sqli/cmdi/creds) plus semgrep, scored against `data/fixtures/`'s six
+  hand-labeled fixtures. Real, unchanging ground truth today — **6/6
+  correct**.
+- **`corpus_label_distribution`** — vulnerable/safe/abstained counts per
+  CWE, from `labeled.parquet`. On the current corpus: 540 samples,
+  exactly 33.33% vulnerable per CWE, **0 abstentions** — the number
+  Phase 1's fixes were built to produce.
+- **`ranker_score_frame` / `ranker_separation_metrics`** — joins
+  `labeled.parquet` + `scores_r2.parquet` on `sample_id` and computes
+  ROC-AUC plus mean score per class. Measured: **AUC = 1.00** on the
+  current corpus — reported with an explicit, code-level caveat (not
+  just prose): this is computed over the *full* corpus, not a held-out
+  split, since `scores_r2.parquet` doesn't carry which split a sample
+  came from. On a small, templated simulated corpus a perfect AUC is a
+  memorization signal, not evidence of generalization. Flagged as a
+  follow-up in §3 above, not treated as a real accuracy claim anywhere
+  in this project's own docs.
+- **`plot_ltt_trace`** — visualizes the actual persisted
+  `ltt_trace.csv` (Phase 1's decision #4): p-value at every candidate
+  threshold, with `alpha` and the winning `t_hat` marked. First time
+  this data has been visualized since it started being persisted.
+- **`scan_ground_truth_eval`** — the one metric evaluating the deployed
+  pipeline end-to-end against ground truth that is entirely real today,
+  not waiting on Track A at all: `examples/vulnerable_app/`'s own
+  hand-labeled CWE table. Run twice:
+  - **Static + certified gate only:** precision 0.50, recall 1.00,
+    F1 0.67 — every real vulnerability caught (semgrep is
+    deterministic), three of the provisional model's false positives
+    also flagged.
+  - **With the live LLM verifier** (`--with-llm`, real `GROQ_API_KEY`
+    call): precision 1.00, recall 1.00, F1 1.00 — the verifier
+    correctly cleared all three false positives and confirmed both real
+    vulnerabilities, with zero unresolved calls. This is the clearest
+    concrete demonstration in the project so far of what the verifier
+    tier is actually for.
+
+**Design decisions.**
+- **Functions take DataFrames/paths, not a fixed corpus name** — every
+  metric function is agnostic to whether its input is
+  `data/model/labeled.parquet` (today) or Track A's real-corpus
+  equivalent (later). `scripts/run_eval.py` is the only place that
+  names `data/model/` specifically, and even that's a `--model-dir`
+  flag, not a hardcoded path.
+- **`scan_ground_truth_eval` counts a unit as "flagged" if ANY finding
+  exists for it**, regardless of source (semgrep/model/verifier) — the
+  question it answers is "did the tool raise concern about this
+  function at all," which is the actual user-facing question a
+  precision/recall number should answer, not a per-source breakdown
+  (the report's detection-attribution table already covers that).
+- **`--with-llm` is opt-in on `run_eval.py`, not the default** — an
+  eval script shouldn't spend API calls just by being run. Once run,
+  `scan/verifier.py`'s existing content-hash cache means a second
+  `--with-llm` run costs zero further calls, which is exactly what
+  happened when generating the numbers above.
+- **New plotting functions have no dedicated unit tests**, matching
+  this project's existing, established convention: `plot_frontier`/
+  `plot_shift_results` (Phase 0/1) have never had tests either — a
+  "did matplotlib not crash" test is low-value, and every new plot was
+  instead generated for real and visually inspected by hand, the same
+  discipline Phase 7/9's PDF work established as more effective at
+  catching real rendering defects than an automated check would be.
+
+**Evidence.** `tests/test_eval_metrics.py` (10 tests): oracle accuracy
+against real fixtures, corpus label distribution counting, score-frame
+joining and abstention-dropping, separation metrics on both
+well-separated and deliberately-inverted synthetic scores, and
+`scan_ground_truth_eval`'s precision/recall/F1/accuracy arithmetic
+including the same-unit-multiple-findings and module-level-finding
+cases. `scripts/run_eval.py` run twice for real (with and without
+`--with-llm`) against the actual `data/model/` artifacts and
+`examples/vulnerable_app/`; every PNG opened and visually inspected, not
+just checked for existence.
+
+**Status rationale.** `SOLID` for the mechanism — every function is
+tested, every script run produced real output, and the one metric with
+entirely real ground truth (`scan_ground_truth_eval`) shows a genuine,
+measured improvement from the LLM verifier. `PROVISIONAL` for anything
+downstream of ranker quality (score distribution, separation, LTT
+trace), for the same reason as every other model-dependent number in
+this log (§6) — plus the additional, explicitly-flagged caveat that the
+AUC figure specifically isn't computed on held-out data yet.

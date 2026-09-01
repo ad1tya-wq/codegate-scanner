@@ -3,15 +3,20 @@ from dataclasses import dataclass
 
 from codegate.scan.pipeline import ScanResult
 
-# Published per-million-token prices, hardcoded (checked 2026-08-31). Only
-# the verifier model needs a price -- generation-side model cost is a
-# research-time concern (Track A), not something a scan report accounts
-# for. Update this table by hand when the number changes; there is no
-# live pricing API call here on purpose (a report must be reproducible
-# from the numbers it was run with, not from whatever a price endpoint
-# returns today).
+# Published per-million-token prices, hardcoded. Only the verifier model
+# needs a price -- generation-side model cost is a research-time concern
+# (Track A), not something a scan report accounts for. Update this table
+# by hand when the number changes; there is no live pricing API call here
+# on purpose (a report must be reproducible from the numbers it was run
+# with, not from whatever a price endpoint returns today).
 _PRICE_PER_MILLION_TOKENS_USD: dict[str, float] = {
-    "llama-3.3-70b-versatile": 0.59,  # Groq, blended input+output estimate
+    # scan/verifier.py's default model as of 2026-09-02 (llama-3.3-70b-versatile
+    # was removed from Groq's catalog -- see that module's _GROQ_MODEL_IDS
+    # comment). $0.59 is carried over from the previous model as a
+    # placeholder, NOT verified against Groq's current pricing for this
+    # specific model -- check console.groq.com/docs/pricing before trusting
+    # a report's estimated_cost_usd for anything real.
+    "openai/gpt-oss-120b": 0.59,
 }
 _DEFAULT_PRICE_PER_MILLION_TOKENS_USD = 0.59
 

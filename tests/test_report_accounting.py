@@ -31,7 +31,7 @@ def test_cost_summary_calls_avoided_combines_auto_approved_and_cache_hits():
 
 
 def test_cost_summary_uses_the_known_price_for_the_named_model():
-    a = compute_cost_summary(_result(tokens_spent=1_000_000), verifier_model="llama-3.3-70b-versatile")
+    a = compute_cost_summary(_result(tokens_spent=1_000_000), verifier_model="openai/gpt-oss-120b")
     b = compute_cost_summary(_result(tokens_spent=1_000_000), verifier_model="some-unknown-model")
     assert a.price_per_million_tokens_usd == 0.59
     assert b.price_per_million_tokens_usd == 0.59  # falls back to the default, not an error

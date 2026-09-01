@@ -1412,10 +1412,106 @@ Not library code (no functions), so no per-function entries -- see
 `clean-install-smoke`) and what the smoke job specifically guards
 against (the eager-`matplotlib`-import bug, decision #10).
 
+## `research/eval/metrics.py`, `research/eval/plots.py` (additions), `scripts/run_eval.py`
+
+Computes and plots every metric CodeGate can currently evaluate. Every
+function is agnostic to whether its input comes from the current
+simulated corpus or Track A's real one later -- see
+`docs/ENGINEERING_LOG.md` section 10 for the measured numbers and the
+honesty caveats attached to each.
+
+#### `oracle_accuracy_on_fixtures(fixtures_dir) -> pd.DataFrame`
+**Does:** Runs the three ground-truth oracles (`check_sqli`,
+`check_cmdi`, `check_creds`) plus `run_semgrep` against each of
+`data/fixtures/`'s six hand-labeled fixtures (ground truth encoded in
+the filename, same convention `tests/test_oracles.py` already relies
+on), and records whether each verdict matched truth.
+**Talks to:** Calls `oracles/sqli_oracle.py::check_sqli`,
+`oracles/cmdi_oracle.py::check_cmdi`, `oracles/creds_oracle.py::check_creds`,
+`oracles/semgrep_oracle.py::run_semgrep`. Called by `scripts/run_eval.py`.
+**Fits in:** OFFLINE (research eval).
+
+#### `corpus_label_distribution(labeled_df) -> pd.DataFrame`
+**Does:** Counts samples by `(cwe, outcome)` where outcome is
+`"vulnerable"`/`"safe"`/`"abstained"` (using `research/pipeline.py`'s
+`LABEL_ABSTAIN` constant to distinguish the third case) -- the shape
+`label_row` produces for any corpus, simulated or real.
+**Talks to:** Called by `scripts/run_eval.py` against
+`data/model/labeled.parquet`.
+**Fits in:** OFFLINE.
+
+#### `ranker_score_frame(labeled_df, scores_df) -> pd.DataFrame`
+**Does:** Joins a labeled corpus with a ranker's per-sample scores on
+`sample_id`, dropping abstentions (excluded from training/calibration
+upstream, so they shouldn't count as "safe" here either).
+**Talks to:** Called by `scripts/run_eval.py` against
+`labeled.parquet` + `scores_r2.parquet`; its output feeds
+`ranker_separation_metrics` and `plots.py::plot_score_distribution_by_label`.
+**Fits in:** OFFLINE.
+
+#### `ranker_separation_metrics(score_frame) -> dict`
+**Does:** ROC-AUC (via `sklearn.metrics.roc_auc_score`, computed against
+`1 - label` since `R2Ranker`'s score is *higher = safer*) plus mean
+score per class. **Explicitly documented caveat, in the docstring
+itself:** whatever built `score_frame` determines whether this is a
+real generalization metric or an optimistic one -- fed the full corpus
+(as `scripts/run_eval.py` does today, no `split` column available yet
+to filter to test-only), a small templated corpus reads as a
+suspiciously perfect AUC, which is a memorization signal, not a
+generalization one.
+**Talks to:** Called by `scripts/run_eval.py`.
+**Tech:** `sklearn.metrics.roc_auc_score`.
+**Fits in:** OFFLINE.
+
+#### `scan_ground_truth_eval(scan_result, ground_truth) -> dict`
+**Does:** Precision/recall/F1/accuracy of a `ScanResult` **as a
+whole** (any finding at all, regardless of source) against a
+hand-labeled `{(filename, func_name): is_vulnerable}` ground truth.
+`func_name="<module>"` matches the same fallback
+`scan/pipeline.py::_semgrep_findings` uses for a module-level finding.
+Multiple findings mapping to the same `(file, func_name)` (e.g. a unit
+with both a semgrep and a model finding) count once, not twice.
+**Talks to:** Consumes a `ScanResult` from `scan/pipeline.py::run_scan`.
+Called by `scripts/run_eval.py` against `examples/vulnerable_app/`'s
+ground truth, once with `verifier=None` and once with a real
+`build_verifier_backend` result.
+**Fits in:** the one function in this module that evaluates the full
+ONLINE pipeline end-to-end, using ground truth that's entirely real
+today (not waiting on Track A).
+
+#### `plots.py` additions: `plot_oracle_accuracy`, `plot_corpus_label_distribution`, `plot_score_distribution_by_label`, `plot_ltt_trace`, `plot_scan_ground_truth`
+**Does:** One matplotlib figure per metrics function above -- a
+correct/incorrect bar per fixture, a stacked bar of corpus outcomes per
+CWE, overlapping safe/vulnerable score histograms, the LTT p-value
+search curve with `alpha`/`t_hat` marked, and a TP/FP/TN/FN bar with
+precision/recall/F1 in the title, respectively. No dedicated tests (see
+`docs/ENGINEERING_LOG.md` section 10 for why -- matches this project's
+existing convention for `plot_frontier`/`plot_shift_results`); verified
+by generating each for real and inspecting the PNG by eye.
+**Talks to:** Called by `scripts/run_eval.py`.
+**Tech:** `matplotlib.pyplot`.
+**Fits in:** OFFLINE.
+
+#### `scripts/run_eval.py::main()`
+**Does:** The orchestration entry point -- calls every function above
+in sequence against `data/model/` and `examples/vulnerable_app/`,
+writes each PNG plus a `metrics.json` summary to `data/eval/`
+(gitignored -- regenerable, not committed). `--with-llm` is opt-in, not
+default, since an eval script shouldn't spend API calls just by being
+run; once run, the verifier's own content-hash cache means later runs
+cost zero further calls.
+**Talks to:** Calls every function in `research/eval/metrics.py` and
+`research/eval/plots.py`, plus `scan/pipeline.py::run_scan` and
+`scan/verifier.py::build_verifier_backend` directly (mirroring
+`scripts/run_real.py`'s standalone-script pattern, not a `codegate` CLI
+subcommand, since eval is an OFFLINE/research-side, occasional-use tool).
+**Fits in:** OFFLINE -- the one command that regenerates every metric
+this project can currently report, unchanged before and after Phase 8.
+
 ## Status
 
-Every module through Phase 9 now has a section above. Only Phase 8
-(retrain on the real corpus, once Track A lands) remains, and it
-changes floats inside `data/model/model.joblib` and
-`data/model/calibration.json`, not any function's signature or
-behavior described in this document.
+Every module through Phase 9, plus the evaluation module built
+alongside it, now has a section above. Only Phase 8 (retrain on the
+real corpus, once Track A lands) remains, and it changes floats inside
+`data/model/model.joblib` and `data/model/calibration.json`, not any
+function's signature or behavior described in this document.
