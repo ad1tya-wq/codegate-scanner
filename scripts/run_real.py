@@ -27,7 +27,9 @@ from codegate.config import load_config, CodeGateConfig
 from codegate.env import get_env
 from codegate.research.corpus.prompts import load_prompt_bank
 from codegate.research.generation.backends import Backend, OllamaBackend
+from codegate.research.generation.harness import run_generation
 from codegate.research.pipeline import run_full_pipeline
+from codegate.schemas import validate_dataframe
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
@@ -89,6 +91,14 @@ def main() -> int:
     parser.add_argument("--base-url", default=None,
                         help="Ollama host URL; overrides OLLAMA_BASE_URL")
     parser.add_argument("--skip-preflight", action="store_true")
+    parser.add_argument(
+        "--generate-only", action="store_true",
+        help="Generate code and stop, without labeling or training. "
+             "Labeling runs the dynamic oracles, which EXECUTE the generated "
+             "code -- never do that on a machine that is only hosting models. "
+             "Use this on the model host, then ship generations.parquet to "
+             "whoever runs the rest of the pipeline.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -108,12 +118,45 @@ def main() -> int:
     print(f"Planned samples: {total}  (resumable -- safe to interrupt and rerun)")
 
     out_dir = Path(args.out_dir)
+    checkpoint = out_dir / "generations.checkpoint.jsonl"
+
+    if args.generate_only:
+        # Generation is pure inference against Ollama -- no generated code is
+        # ever executed here. That is why this mode is safe to run on someone
+        # else's machine, and why the labeling half deliberately stays behind.
+        out_dir.mkdir(parents=True, exist_ok=True)
+        gen_df = run_generation(
+            prompts, backends,
+            samples_per_prompt=cfg.samples_per_prompt,
+            is_simulated=False,
+            checkpoint_path=checkpoint,
+        )
+        if gen_df.empty:
+            raise SystemExit(
+                "\nERROR: every generation failed -- nothing was produced.\n"
+                "  Ollama is most likely not running, or stopped partway.\n"
+                "  Start it, then rerun the exact same command: completed\n"
+                "  samples are kept, so you resume rather than start over.\n"
+            )
+
+        validate_dataframe(gen_df, "generations")
+        out_path = out_dir / "generations.parquet"
+        gen_df.to_parquet(out_path)
+
+        print("\n=== GENERATION COMPLETE ===")
+        print(f"Samples generated : {len(gen_df)}")
+        print(f"Generators        : {sorted(gen_df['generator'].unique())}")
+        print(f"Unique snippets   : {gen_df['code'].nunique()}")
+        print(f"\nSend this ONE file back:\n  {out_path.resolve()}")
+        print("\nNo labeling was performed and no generated code was executed.")
+        return 0
+
     summary = run_full_pipeline(
         cfg, prompts, backends,
         is_simulated=False,
         out_dir=out_dir,
         use_semgrep_and_adjudicator=True,
-        checkpoint_path=out_dir / "generations.checkpoint.jsonl",
+        checkpoint_path=checkpoint,
     )
 
     print("\n=== CODEGATE REAL RUN SUMMARY ===")
