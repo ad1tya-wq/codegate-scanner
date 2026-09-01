@@ -25,8 +25,8 @@ Four status labels are used throughout:
 | 0 | New repo + migration | SOLID | `5712ea3` | baseline green |
 | 1 | Fix the foundation (4 defects) | SOLID | `b84e2c9` | 89 passed |
 | 1.5 | Ollama-only corpus generation + `--generate-only` | SOLID (mechanism) / PROVISIONAL (data) | `ba642e7` | 89 passed |
-| 2 | Persistence layer (`research/artifacts.py`) | SOLID (mechanism) / PROVISIONAL (current artifact) | `e894152`+ | 97 passed |
-| 3 | Packaging + CLI | NOT STARTED (entry point declared, module absent) | — | — |
+| 2 | Persistence layer (`research/artifacts.py`) | SOLID (mechanism) / PROVISIONAL (current artifact) | `8f5bed3` | 97 passed |
+| 3 | Packaging + CLI (`info`, `calibrate` solid; `scan` scaffolded) | SOLID (`info`/`calibrate`) / NOT STARTED (`scan` — Phase 4-7 dependency) | pending | 104 passed |
 | 4 | Ingest | NOT STARTED | — | — |
 | 5 | Scan pipeline | NOT STARTED | — | — |
 | 6 | LLM verifier | NOT STARTED | — | — |
@@ -34,7 +34,7 @@ Four status labels are used throughout:
 | 9 | Demo assets | NOT STARTED | — | — |
 | 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
 
-Current test suite: **97 passed**, 0 failed, ~80s wall clock
+Current test suite: **104 passed**, 0 failed, ~200s wall clock
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -267,15 +267,92 @@ is `PROVISIONAL` because it's trained on the simulated corpus — which is
 exactly what `is_provisional: true` in the written file now states
 outright, closing the loop on G1's purpose.
 
-### Phases 3–7, 9 — `NOT STARTED`
+### Phase 3 — Packaging + CLI — `info`/`calibrate` `SOLID`, `scan` `NOT STARTED`
 
-Packaging/CLI, ingest, scan pipeline, verifier, PDF reporting, and demo
-assets are all planned but not yet built. See the plan file for the
-current design of each. `pyproject.toml` already declares
-`[project.scripts] codegate = "codegate.cli:app"` (Phase 0 migration) even
-though `cli.py` does not exist yet — `pip install -e .` succeeds today,
-but the installed `codegate` command will fail on invocation until Phase 3
-lands. Noted here so it isn't mistaken for an oversight when found later.
+**What was done.** Added `cli.py`: a `typer` app with three subcommands
+(`info`, `calibrate`, `scan`), installed as the `codegate` console script
+via the `[project.scripts]` entry already declared in `pyproject.toml`
+since Phase 0. Packaging itself needed no changes — `pyproject.toml`'s
+`[build-system]`/dependencies/src-layout were already complete from the
+Phase 0 migration, so this phase was purely `cli.py` plus verifying the
+install actually works.
+
+**Decisions taken and why.**
+- **`info` and `calibrate` are fully functional now; `scan` is an honest
+  scaffold, not a stub pretending to work.** `scan` needs ingest (Phase 4)
+  and the scan pipeline (Phase 5) to do anything real. Rather than leave
+  the command unregistered (which would make `pip install -e .` +
+  `codegate scan ...` fail with an unhelpful "no such command") or fake a
+  result, it validates its full argument surface (`--format` against the
+  four allowed values) and then prints an explicit "not implemented yet,
+  here's which phases it's waiting on" message, exiting with code `2`
+  (distinct from `0` success / `1` error) rather than crashing or looking
+  like a silent no-op. The project's own honesty discipline
+  (`is_provisional`, G1) applies to the CLI's own incompleteness too, not
+  just to model quality.
+- **`scan`'s argument surface is fixed now, before the implementation
+  exists.** `--format {pdf,json,sarif,terminal}`, `--output`, `--no-llm`,
+  `--alpha` — all present and validated today, so Phases 5-7 land as an
+  implementation swap behind an already-stable CLI contract, not a
+  redesign.
+- **`codegate calibrate` unifies `scripts/run_pipeline_dry_run.py` and
+  `scripts/run_real.py`'s backend-selection logic under one command**
+  (`--real` flag switches `SimulatedBackend` → `OllamaBackend`, mirroring
+  `run_real.py::build_backends`) rather than importing from `scripts/`
+  (not an installed package) or duplicating `run_full_pipeline`'s call.
+  The two standalone scripts are left as-is for the specific unattended /
+  diagnostic-output use cases they're already tuned for (Track A's
+  multi-hour host run in particular) — this is a convenience layer, not a
+  replacement.
+- **Established `data/model/` as the canonical artifact location.** Not
+  specified by the plan beyond "commit trained artifacts"; picked a fixed
+  directory (independent of any particular run's `--out-dir`, which
+  varies) so `codegate info` and the future `codegate scan` have one
+  answer for "where's the model" without a config lookup. Ran
+  `codegate calibrate` and committed the result — `data/model/model.joblib`
+  + `calibration.json` (correctly `is_provisional: true`,
+  `corpus_version: "simulated-v2"`) — so a fresh clone can run
+  `codegate info` with zero setup, closing that locked decision from the
+  original plan.
+- **Found and fixed a real version-string bug while verifying the
+  install.** `src/codegate/__init__.py` had `__version__ = "0.1.0"` while
+  `pyproject.toml` declares `0.2.0` — and `docs/OLLAMA_SETUP.md` step A4
+  explicitly tells the host to run
+  `python -c "import codegate; print('CodeGate', codegate.__version__)"`
+  and expect `CodeGate 0.2.0`. That verification step would have failed
+  for the teammate running the setup guide. Bumped `__init__.py` to match.
+- **Avoided the `§` section-symbol character in CLI-printed strings.**
+  Found it renders as mojibake (`�3`) in a default-codepage Windows
+  terminal — the team's actual environment — when first testing `scan`'s
+  and `info`'s output. Replaced with plain "Part 3" / "section 6" wording
+  in user-facing CLI text specifically (doc files themselves are
+  unaffected, since they're read as UTF-8 rather than printed to a
+  legacy-codepage console).
+
+**Evidence.** `codegate --help` lists all three commands after
+`pip install -e .`. `codegate calibrate` (simulated, full 135-prompt bank)
+reproduced the exact numbers already recorded in section 6 of this log
+(33.33% vulnerable rate, `t_hat ≈ 0.6613`, 66.7% coverage at alpha=0.05) —
+consistent with the earlier measurement being a real, reproducible number
+and not a one-off. `codegate info` against the result correctly prints the
+`PROVISIONAL` banner. `tests/test_cli.py` (7 tests, via `typer.testing.CliRunner`)
+covers: missing-model error message, certificate printing with and without
+the provisional banner, `ArtifactVersionError` surfaced through the CLI,
+invalid `--format` rejection, the "not implemented" exit code on `scan`,
+and an end-to-end `calibrate` run that asserts the artifact files land on
+disk.
+
+**Status rationale.** `info` and `calibrate` are `SOLID` — tested via
+`CliRunner`, and independently verified by hand against the real
+`data/model/` artifacts now committed. `scan` is correctly `NOT STARTED`;
+what exists is a tested, honest scaffold, not a partial implementation of
+the scan pipeline itself.
+
+### Phases 4–7, 9 — `NOT STARTED`
+
+Ingest, scan pipeline, verifier, PDF reporting, and demo assets are all
+planned but not yet built. See the plan file for the current design of
+each.
 
 ## 4 · Decision log
 
@@ -308,6 +385,9 @@ Chronological, including reversals. Each entry: what changed, and why.
 - Phase 0 migration — zero test regressions carried into the new repo
 - Persistence round trip (`research/artifacts.py`) — model + certificate
   save/load, version guard tested against an actual mismatch
+- CLI (`info`, `calibrate`) — end-to-end verified both by test and by hand
+  against the real `data/model/` artifacts, which reproduced the exact
+  numbers already on record in section 6
 
 **Needs integration testing — built and unit-tested, not yet exercised
 end-to-end:**
@@ -328,10 +408,12 @@ end-to-end:**
   to build the scanner against)
 - Any coverage/frontier number computed from the simulated corpus
 - The `model.joblib`/`calibration.json` pair currently on disk from any
-  simulated run — correctly labeled `is_provisional: true`
+  simulated run, including the one now committed at `data/model/` —
+  correctly labeled `is_provisional: true`
 
-**Not started:** Phases 3–7, 9 (CLI, ingest, scan pipeline, verifier, PDF
-reporting, demo assets).
+**Not started:** Phases 4–7, 9 (ingest, scan pipeline, verifier, PDF
+reporting, demo assets). `scan` is registered in the CLI but explicitly
+reports itself as not implemented (see Phase 3 entry above).
 
 ## 6 · Building ahead of the trained model — the evidence
 
@@ -373,7 +455,7 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-97 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+104 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 verified this session).
 
 | File | Tests | Protects |
@@ -382,6 +464,7 @@ verified this session).
 | `test_oracle_robustness.py` | 15 | The SQLi table-name abstention-defect class specifically — parametrized over 7+ table names, plus the sink-shortcut correctness tests |
 | `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
 | `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
+| `test_cli.py` | 7 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate + provisional banner, version-guard surfaced through the CLI, invalid `--format` rejection, `scan`'s not-implemented exit code, end-to-end `calibrate` artifact write |
 | `test_generation_resume.py` | 6 | Checkpoint write/read, resume-skips-completed, partial-failure doesn't abort the batch |
 | `test_corpus.py` | 6 | Prompt bank loading, prompt/flavor/split shape |
 | `test_risk.py` | 5 | `empirical_risk`, Clopper-Pearson interval edge cases |

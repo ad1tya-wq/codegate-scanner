@@ -10,6 +10,15 @@ venv/
 secrets.yaml
 data/runs/*
 !data/runs/.gitkeep
+
+# codegate calibrate's default --out-dir. Only the two persisted artifacts
+# are meant to be committed (fresh-clone zero-setup); the rest of the
+# pipeline's diagnostic output (frontier plots, generations, etc.) that
+# also lands here is regenerable and stays local, same convention as
+# data/runs/* above.
+data/model/*
+!data/model/model.joblib
+!data/model/calibration.json
 *.parquet
 !data/fixtures/**/*.parquet
 .DS_Store

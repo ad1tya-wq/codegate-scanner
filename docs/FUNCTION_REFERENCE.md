@@ -739,12 +739,67 @@ branch, right after the operating `LTTResult` is computed.)
 
 ---
 
+## `cli.py` — command-line interface (Phase 3)
+
+`typer` app, installed as the `codegate` console script
+(`[project.scripts]` in `pyproject.toml`). Three subcommands.
+
+#### `info(model_dir=DEFAULT_MODEL_DIR) -> None`
+**Does:** Loads the model + calibration pair from `model_dir` (default
+`data/model/`, the canonical location the repo commits its shipped
+artifacts to) via `load_artifacts`, and prints a table: ranker ID, corpus
+version, `t_hat`, certified alpha, confidence, calibration sample count,
+creation timestamp. Prints a highlighted `PROVISIONAL` warning (pointing
+at `docs/ENGINEERING_LOG.md` section 6) when `calib.is_provisional` is
+true. Exits 1 with the raw exception message on a missing file or a
+`ranker_id` mismatch — no swallowed errors.
+**Talks to:** Calls `research/artifacts.py::load_artifacts`.
+**Tech:** `typer`, `rich.table.Table`.
+**Fits in:** ONLINE — the "what am I currently certifying" surface.
+
+#### `calibrate(config, out_dir=DEFAULT_MODEL_DIR, real=False, base_url=None, limit=None) -> None`
+**Does:** Loads config and the prompt bank, builds either
+`SimulatedBackend`s (default — zero dependencies, matches "fresh clone
+works with zero setup") or `OllamaBackend`s (`--real`, mirroring
+`scripts/run_real.py`'s backend wiring), then calls
+`run_full_pipeline`. Prints the resulting vulnerable rate, `t_hat`, and
+coverage, and confirms where `model.joblib`/`calibration.json` were
+written.
+**Talks to:** Calls `load_config`, `load_prompt_bank`, `SimulatedBackend`/
+`OllamaBackend`, `run_full_pipeline` (which internally calls
+`save_model`/`save_calibration`). This is what produced the
+`data/model/model.joblib` + `calibration.json` committed to the repo.
+**Tech:** `typer`.
+**Fits in:** OFFLINE — the CLI's entry point into the research pipeline;
+this is "re-run the research path" from the CLI rather than a standalone
+script.
+
+#### `scan(path, format="terminal", output=None, no_llm=False, alpha=None) -> None`
+**Does:** Validates `--format` against `{pdf, json, sarif, terminal}` and
+exits 1 on an invalid value. Otherwise prints an explicit "not
+implemented yet" message naming which phases (4-7) it's waiting on, and
+exits 2 -- deliberately not a silent no-op or a crash, so a fresh-clone
+user gets an honest answer rather than a traceback. Its full argument
+surface (`--format`, `--output`, `--no-llm`, `--alpha`) is already fixed
+so Phase 5-7 land as an implementation swap, not a CLI redesign.
+**Talks to:** Nothing yet -- no callees until ingest (Phase 4) exists.
+**Tech:** `typer`.
+**Fits in:** ONLINE -- the command this whole project is building toward;
+currently a scaffold with an honest status message, not a working scanner.
+
+**Canonical artifact location established this phase:**
+`data/model/model.joblib` + `data/model/calibration.json` -- not
+gitignored (unlike `data/runs/*`), and now committed, so
+`codegate info` works immediately on a fresh clone per the locked
+decision in the original plan ("commit trained artifacts").
+
+---
+
 ## Not yet written
 
-Phases 3–7 and 9 will each add a section here, in the same commit as the
+Phases 4–7 and 9 will each add a section here, in the same commit as the
 code:
 
-- **Phase 3** — `cli.py`: `codegate scan/info/calibrate`
 - **Phase 4** — `scan/ingest.py`: directory walk → AST function-level units
 - **Phase 5** — `scan/pipeline.py`, `scan/findings.py`: ingest → static →
   rank → gate wiring

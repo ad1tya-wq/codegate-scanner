@@ -1,0 +1,10 @@
+{
+  "t_hat": 0.6612771114113369,
+  "alpha": 0.05,
+  "delta": 0.05,
+  "n_vuln_calib": 60,
+  "ranker_id": "R2",
+  "corpus_version": "simulated-v2",
+  "is_provisional": true,
+  "created_at": "2026-09-01T15:41:51.228570+00:00"
+}
