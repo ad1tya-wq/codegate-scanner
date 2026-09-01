@@ -26,15 +26,15 @@ Four status labels are used throughout:
 | 1 | Fix the foundation (4 defects) | SOLID | `b84e2c9` | 89 passed |
 | 1.5 | Ollama-only corpus generation + `--generate-only` | SOLID (mechanism) / PROVISIONAL (data) | `ba642e7` | 89 passed |
 | 2 | Persistence layer (`research/artifacts.py`) | SOLID (mechanism) / PROVISIONAL (current artifact) | `8f5bed3` | 97 passed |
-| 3 | Packaging + CLI (`info`, `calibrate` solid; `scan` scaffolded) | SOLID (`info`/`calibrate`) / NOT STARTED (`scan` — Phase 4-7 dependency) | pending | 104 passed |
-| 4 | Ingest | NOT STARTED | — | — |
+| 3 | Packaging + CLI (`info`, `calibrate` solid; `scan` scaffolded) | SOLID (`info`/`calibrate`) / NOT STARTED (`scan` — Phase 4-7 dependency) | `e1dbff4` | 104 passed |
+| 4 | Ingest (`scan/ingest.py`) | SOLID | pending | 113 passed |
 | 5 | Scan pipeline | NOT STARTED | — | — |
 | 6 | LLM verifier | NOT STARTED | — | — |
 | 7 | PDF reporting | NOT STARTED | — | — |
 | 9 | Demo assets | NOT STARTED | — | — |
 | 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
 
-Current test suite: **104 passed**, 0 failed, ~200s wall clock
+Current test suite: **113 passed**, 0 failed, ~190s wall clock
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -348,11 +348,61 @@ disk.
 what exists is a tested, honest scaffold, not a partial implementation of
 the scan pipeline itself.
 
-### Phases 4–7, 9 — `NOT STARTED`
+### Phase 4 — Ingest (`scan/ingest.py`) — `SOLID`
 
-Ingest, scan pipeline, verifier, PDF reporting, and demo assets are all
-planned but not yet built. See the plan file for the current design of
-each.
+**What was done.** Added `scan/ingest.py`: `ingest_path(path)` turns a
+file or directory into function-level `Unit`s (file, lineno, func_name,
+source, content_hash, token_estimate), the first module in the ONLINE
+half. Recursive directory walk skips `venv`/`.venv`/`site-packages`/`.git`/
+`__pycache__` unconditionally and honors a `.gitignore` at the scan root
+for everything else. Every `FunctionDef`/`AsyncFunctionDef` node becomes
+its own unit, including nested functions and methods.
+
+**Decisions taken and why.**
+- **A lightweight `.gitignore` reader, not a full parser.** Supports plain
+  names, directory patterns, and glob wildcards — the overwhelming
+  majority of real `.gitignore` content — but explicitly does not support
+  negation (`!pattern`) lines; they're skipped rather than mishandled.
+  Documented as an intentional scope limit in the function's own
+  docstring, not a silent gap: a real gitignore parser (full negation,
+  anchoring, `**` semantics) is more machinery than a scanner needs, and
+  claiming full compatibility while actually being wrong on negated
+  patterns would be worse than an honest partial implementation.
+- **Function-level units include nested functions and methods, not just
+  top-level defs.** The plan calls for "function-level units" because the
+  ranker was trained on function-sized snippets; a method or a nested
+  closure is exactly as function-sized as a top-level function, so
+  excluding them would silently shrink scan coverage on any
+  class-heavy or closure-heavy codebase for no principled reason.
+- **`SkippedFile` as an explicit result field, not a log line.** An
+  unreadable or unparseable file disappearing from a scan without a
+  trace in the *return value* is exactly the class of silent-failure this
+  project's own `LABEL_ABSTAIN` design (Phase 1) exists to prevent on the
+  research side — applied here to ingest. `IngestResult` always carries
+  both `units` and `skipped` together so a caller can't see one without
+  the other.
+- **A single file bypasses `.gitignore`/skip-dir filtering entirely.** If
+  the user names a file directly (`codegate scan somefile.py`), that's an
+  explicit request that shouldn't be second-guessed by directory-walk
+  heuristics meant for "don't wander into `venv/`."
+
+**Evidence.** `tests/test_ingest.py` (9 tests): single-file extraction,
+nested/method extraction, lineno/hash correctness, hash stability across
+identical functions in different files, syntax-error and unreadable-file
+reporting without dropping good files, missing-path error, directory walk
+with `venv` skip, `.gitignore` honoring. Also run by hand against the
+repo's own `src/` tree: **62 units, 0 skipped files** — a real
+"does it actually work on non-fixture code" check, not just synthetic
+`tmp_path` cases. 113 tests passing (was 104).
+
+**Status rationale.** `SOLID` — tested against both synthetic edge cases
+and the real codebase, and its scope limits (no gitignore negation) are
+stated in the code rather than discovered by a future bug report.
+
+### Phases 5–7, 9 — `NOT STARTED`
+
+Scan pipeline, verifier, PDF reporting, and demo assets are all planned
+but not yet built. See the plan file for the current design of each.
 
 ## 4 · Decision log
 
@@ -388,6 +438,8 @@ Chronological, including reversals. Each entry: what changed, and why.
 - CLI (`info`, `calibrate`) — end-to-end verified both by test and by hand
   against the real `data/model/` artifacts, which reproduced the exact
   numbers already on record in section 6
+- Ingest (`scan/ingest.py`) — verified against synthetic edge cases and
+  against the repo's own `src/` tree (62 units, 0 skipped)
 
 **Needs integration testing — built and unit-tested, not yet exercised
 end-to-end:**
@@ -411,9 +463,10 @@ end-to-end:**
   simulated run, including the one now committed at `data/model/` —
   correctly labeled `is_provisional: true`
 
-**Not started:** Phases 4–7, 9 (ingest, scan pipeline, verifier, PDF
-reporting, demo assets). `scan` is registered in the CLI but explicitly
-reports itself as not implemented (see Phase 3 entry above).
+**Not started:** Phases 5–7, 9 (scan pipeline, verifier, PDF reporting,
+demo assets). `scan` is registered in the CLI but explicitly reports
+itself as not implemented (see Phase 3 entry above) — ingest exists
+(Phase 4) but nothing calls it yet.
 
 ## 6 · Building ahead of the trained model — the evidence
 
@@ -455,7 +508,7 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-104 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+113 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 verified this session).
 
 | File | Tests | Protects |
@@ -463,6 +516,7 @@ verified this session).
 | `test_oracles.py` | 21 | Core oracle contracts: `function_exists`, sandbox execution/timeout/exit-code capture, SQLi/cmdi/creds detection on fixtures, consensus rule (all four branches), semgrep hit/clear on fixtures |
 | `test_oracle_robustness.py` | 15 | The SQLi table-name abstention-defect class specifically — parametrized over 7+ table names, plus the sink-shortcut correctness tests |
 | `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
+| `test_ingest.py` | 9 | Function/method/nested-function extraction, lineno/hash correctness, hash stability, syntax-error and unreadable-file reporting, `venv` skip, `.gitignore` honoring, missing-path error |
 | `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
 | `test_cli.py` | 7 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate + provisional banner, version-guard surfaced through the CLI, invalid `--format` rejection, `scan`'s not-implemented exit code, end-to-end `calibrate` artifact write |
 | `test_generation_resume.py` | 6 | Checkpoint write/read, resume-skips-completed, partial-failure doesn't abort the batch |

@@ -795,12 +795,110 @@ decision in the original plan ("commit trained artifacts").
 
 ---
 
+## `scan/ingest.py` — turning a path into scoreable units (Phase 4)
+
+The first ONLINE-half module. Turns a file or directory into function-level
+`Unit`s -- the atom every later scan stage (static pre-pass, ranking,
+gating, verification) operates on.
+
+#### `Unit` (frozen dataclass)
+**Does:** One function: `file`, `lineno`, `func_name`, `source` (exact
+source text via `ast.get_source_segment`), `content_hash` (sha256 of
+`source` — drives Phase 6's verifier cache), `token_estimate` (chars/4
+heuristic — drives Phase 7's savings accounting).
+**Talks to:** Constructed by `_ingest_files`. Will be consumed by
+`scan/pipeline.py` (Phase 5) as the input to static/rank/gate, and by
+`scan/verifier.py` (Phase 6) keyed on `content_hash`.
+**Tech:** stdlib `dataclasses`, `hashlib`.
+**Fits in:** ONLINE — the unit of work for every later scan stage.
+
+#### `SkippedFile` (frozen dataclass)
+**Does:** One file that couldn't become units, with a human-readable
+`reason` (unreadable / syntax error). Exists so a scan reports what it
+couldn't look at, instead of silently shrinking its own coverage — the
+same discipline as `LABEL_ABSTAIN` on the research side (see
+`ENGINEERING_LOG.md` §3 Phase 1 item 2), applied to ingest.
+**Talks to:** Constructed by `_ingest_files`; collected into
+`IngestResult.skipped`. Will surface in Phase 7's report (a "skipped
+files" appendix) rather than being silently discarded.
+**Tech:** stdlib `dataclasses`.
+**Fits in:** ONLINE — ingest failure reporting.
+
+#### `IngestResult` (frozen dataclass)
+**Does:** Carries `units: list[Unit]` and `skipped: list[SkippedFile]`
+together, so a caller can never see one without the other.
+**Talks to:** Returned by `ingest_path`.
+**Fits in:** ONLINE.
+
+#### `_load_gitignore_patterns(root) -> list[str]`
+**Does:** Reads `root/.gitignore` if present; returns plain-name, glob,
+and directory (`trailing '/'` stripped) patterns. Explicitly does not
+support negation (`!pattern`) lines — skips them rather than
+mishandling them, documented in the docstring as an intentional scope
+limit rather than an oversight.
+**Talks to:** Called once by `_ingest_directory`.
+**Tech:** stdlib `pathlib`.
+**Fits in:** ONLINE.
+
+#### `_is_ignored(rel_path, patterns) -> bool`
+**Does:** Checks a relative path against the loaded patterns —
+per-path-component match and whole-relative-path match, both via
+`fnmatch`.
+**Talks to:** Called by `_ingest_directory` for every candidate `.py`
+file.
+**Tech:** stdlib `fnmatch`.
+**Fits in:** ONLINE.
+
+#### `_estimate_tokens(source) -> int`
+**Does:** `max(1, len(source) // 4)` — the documented chars/4 heuristic
+the plan calls for in place of a `tiktoken` dependency. Deliberately the
+same estimator used on both sides of Phase 7's savings accounting, so the
+comparison stays internally consistent even though it isn't an exact
+token count.
+**Talks to:** Called by `_ingest_files` for every unit.
+**Fits in:** ONLINE — will be reused by `report/accounting.py` (Phase 7).
+
+#### `_ingest_files(paths) -> IngestResult`
+**Does:** For each path: reads it (catching `UnicodeDecodeError`/`OSError`
+into a `SkippedFile`), `ast.parse`s it (catching `SyntaxError` into a
+`SkippedFile`), then walks the tree collecting every
+`FunctionDef`/`AsyncFunctionDef` node — including nested functions and
+methods, each its own `Unit` — into `units`.
+**Talks to:** Calls `ast.parse`, `ast.walk`, `ast.get_source_segment`.
+Called by both `_ingest_directory` and `ingest_path` (single-file case).
+**Tech:** stdlib `ast`, `hashlib`.
+**Fits in:** ONLINE — the actual AST-to-units conversion.
+
+#### `_ingest_directory(root) -> IngestResult`
+**Does:** Recursively walks `root` for `*.py` files, skipping the fixed
+non-source directory names (`venv`, `.venv`, `site-packages`, `.git`,
+`__pycache__` — checked regardless of `.gitignore` content) and anything
+`_is_ignored` against the loaded `.gitignore` patterns, then delegates to
+`_ingest_files`.
+**Talks to:** Calls `_load_gitignore_patterns`, `_is_ignored`,
+`_ingest_files`.
+**Tech:** `pathlib.Path.rglob`.
+**Fits in:** ONLINE — directory-mode ingest.
+
+#### `ingest_path(path) -> IngestResult`
+**Does:** The public entry point. Dispatches to `_ingest_files([path])`
+for a single file (skip-dir/`.gitignore` rules don't apply — the caller
+named this file explicitly) or `_ingest_directory(path)` for a directory.
+Raises `FileNotFoundError` for anything else.
+**Talks to:** Will be called by `scan/pipeline.py` (Phase 5) and, through
+it, by `cli.py::scan` once that command is implemented.
+**Tech:** `pathlib`.
+**Fits in:** ONLINE — `codegate scan <path>`'s first step.
+
+**Verified against the repo's own `src/` tree**: 62 units, 0 skipped files
+(command run this session).
+
+---
+
 ## Not yet written
 
-Phases 4–7 and 9 will each add a section here, in the same commit as the
+Phases 5–7 and 9 will each add a section here, in the same commit as the
 code:
-
-- **Phase 4** — `scan/ingest.py`: directory walk → AST function-level units
 - **Phase 5** — `scan/pipeline.py`, `scan/findings.py`: ingest → static →
   rank → gate wiring
 - **Phase 6** — `scan/verifier.py`: escalation LLM call, content-hash cache
