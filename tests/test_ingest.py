@@ -37,6 +37,7 @@ def test_ingest_unit_has_correct_lineno_and_hash(tmp_path):
     unit = result.units[0]
     assert unit.func_name == "handler"
     assert unit.lineno == 3
+    assert unit.end_lineno == 4
     assert unit.source.startswith("def handler(a):")
     assert len(unit.content_hash) == 64  # sha256 hex digest
     assert unit.token_estimate >= 1

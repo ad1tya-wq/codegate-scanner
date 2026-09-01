@@ -229,24 +229,51 @@ sample are reduced to one label.
 
 ### `oracles/semgrep_oracle.py`
 
+#### `_run_semgrep_cli(target, ruleset_path=None, timeout=60) -> dict`
+**Does:** The shared CLI invocation both public functions below wrap:
+runs `semgrep --config <ruleset> --json --quiet <target>` against a real
+path already on disk (a file or a whole directory — semgrep accepts
+either), parses the JSON payload into
+`{"hit": bool, "findings": [{"rule_id", "severity", "path", "start_line",
+"end_line", "message"}, ...]}`. Degrades to
+`{"hit": False, "findings": [], "error": "..."}` instead of raising if the
+binary is missing, the call times out, or the output isn't parseable
+JSON — added when Phase 5 gave callers a real caller-supplied `timeout`
+(120s for directory scans vs. the original hardcoded 60s for snippets),
+which the single combined function couldn't express cleanly for both
+use cases.
+**Talks to:** Called by `run_semgrep` (wraps a temp file) and
+`run_semgrep_on_path` (calls it directly on the caller's path).
+**Tech:** the `semgrep` CLI via `subprocess`, `json` for output parsing.
+**Fits in:** shared by both OFFLINE and ONLINE call sites.
+
 #### `run_semgrep(code, ruleset_path=None) -> dict`
-**Does:** Writes `code` to a temp file and invokes the `semgrep` CLI
-against CodeGate's local custom ruleset (`data/semgrep_rules/codegate_rules.yaml`
-— written in-house because the free community registry packs were
-verified to produce zero findings against raw-stdlib `sqlite3`/`subprocess`
-code; they target framework code like SQLAlchemy/Django/Flask). Returns
-`{"hit": bool, "findings": [...]}` with each finding's rule ID and
-severity. Degrades to `{"hit": False, "findings": [], "error": "..."}`
-instead of raising if the semgrep binary is missing or the call times out,
-so the pipeline can still run on a machine without semgrep installed.
+**Does:** Writes `code` to a temp file, then delegates to
+`_run_semgrep_cli`. Used when the caller has an in-memory code string
+rather than a real file — CodeGate's local custom ruleset
+(`data/semgrep_rules/codegate_rules.yaml` — written in-house because the
+free community registry packs were verified to produce zero findings
+against raw-stdlib `sqlite3`/`subprocess` code; they target framework
+code like SQLAlchemy/Django/Flask) is the default.
 **Talks to:** Called by `research/pipeline.py::label_row` (when
 `use_semgrep_and_adjudicator=True`) and by
 `ranker/r0_semgrep_score.py::score_r0`.
-**Tech:** the `semgrep` CLI via `subprocess`, `json` for output parsing.
-**Fits in:** OFFLINE today (per-sample, in the labeling/R0-scoring path).
-Phase 5 will add a *second*, ONLINE use — one semgrep invocation over an
-entire target directory, the fix for the per-row throughput problem this
-module's own docstring on `r0_semgrep_score.py` flags.
+**Tech:** `tempfile`, then `_run_semgrep_cli`.
+**Fits in:** OFFLINE — per-sample, in the labeling/R0-scoring path.
+
+#### `run_semgrep_on_path(target, ruleset_path=None) -> dict`
+**Does:** Runs semgrep directly against a real file or directory already
+on disk — one CLI invocation covering an entire target, at a 120s
+timeout (vs. `run_semgrep`'s 60s), rather than one invocation per unit.
+This is the fix for the per-row throughput problem
+`ranker/r0_semgrep_score.py`'s own docstring flags: at scan scale (a
+whole codebase) one process spawn beats hundreds.
+**Talks to:** Called by `scan/pipeline.py::_semgrep_findings` (Phase 5).
+Findings carry real file paths and line numbers so they can be mapped
+back to specific `scan/ingest.py::Unit`s.
+**Tech:** `_run_semgrep_cli` directly (no temp file — the target is
+already a real path).
+**Fits in:** ONLINE — the scan pipeline's static pre-pass.
 
 ---
 
@@ -802,13 +829,15 @@ The first ONLINE-half module. Turns a file or directory into function-level
 gating, verification) operates on.
 
 #### `Unit` (frozen dataclass)
-**Does:** One function: `file`, `lineno`, `func_name`, `source` (exact
-source text via `ast.get_source_segment`), `content_hash` (sha256 of
-`source` — drives Phase 6's verifier cache), `token_estimate` (chars/4
-heuristic — drives Phase 7's savings accounting).
-**Talks to:** Constructed by `_ingest_files`. Will be consumed by
-`scan/pipeline.py` (Phase 5) as the input to static/rank/gate, and by
-`scan/verifier.py` (Phase 6) keyed on `content_hash`.
+**Does:** One function: `file`, `lineno`, `end_lineno` (added in Phase 5
+so a line-based finding — e.g. from semgrep — can be mapped back to the
+unit whose range contains it), `func_name`, `source` (exact source text
+via `ast.get_source_segment`), `content_hash` (sha256 of `source` —
+drives Phase 6's verifier cache), `token_estimate` (chars/4 heuristic —
+drives Phase 7's savings accounting).
+**Talks to:** Constructed by `_ingest_files`. Consumed by
+`scan/pipeline.py` (Phase 5) as the input to static/rank/gate, and will
+be consumed by `scan/verifier.py` (Phase 6) keyed on `content_hash`.
 **Tech:** stdlib `dataclasses`, `hashlib`.
 **Fits in:** ONLINE — the unit of work for every later scan stage.
 
@@ -895,12 +924,117 @@ it, by `cli.py::scan` once that command is implemented.
 
 ---
 
+## `scan/findings.py`, `scan/pipeline.py` — ingest → static → rank → gate (Phase 5)
+
+The second ONLINE-half module pair. `findings.py` defines the one typed
+record every scan-producing stage emits; `pipeline.py` wires the four
+stages together into `run_scan`, the function `codegate scan` will
+eventually call.
+
+#### `Finding` (frozen dataclass, `scan/findings.py`)
+**Does:** One reportable result: `file`, `line`, `func_name`, `cwe`,
+`severity`, `source` (validated in `__post_init__` to be one of
+`"semgrep"`, `"model"`, `"verifier"` — raises `ValueError` otherwise),
+`confidence`, `message`, `fix_hint`. `source` is what makes Phase 7's
+detection-attribution table (semgrep vs. model-escalated vs.
+LLM-confirmed vs. auto-approved) possible — designed in now rather than
+retrofitted later.
+**Talks to:** Constructed by `scan/pipeline.py::_semgrep_findings` and
+`_rank_and_gate`. Will be constructed by `scan/verifier.py` (Phase 6,
+`source="verifier"`) and consumed by every `report/` module (Phase 7).
+**Tech:** stdlib `dataclasses`.
+**Fits in:** ONLINE — the common currency of the whole scan pipeline.
+
+#### `ScanResult` (frozen dataclass, `scan/pipeline.py`)
+**Does:** The return value of `run_scan`: `findings: list[Finding]`,
+`n_units`, `n_auto_approved`, `n_escalated`, `skipped: list[SkippedFile]`
+(passed through from ingest).
+**Talks to:** Returned by `run_scan`. Will be the direct input to every
+`report/` formatter (Phase 7).
+**Fits in:** ONLINE.
+
+#### `_base_rule_id(rule_id) -> str`
+**Does:** Strips semgrep's path-derived namespace prefix
+(`data.semgrep_rules.codegate-sqli-string-build` →
+`codegate-sqli-string-build`) that appears when the ruleset is loaded
+from a local file rather than the registry. Safe because this project's
+own rule ids use hyphens, never dots, so the segment after the last `.`
+always recovers the id exactly as written in `codegate_rules.yaml`,
+regardless of the caller's working directory.
+**Talks to:** Called by `_semgrep_findings` before the `_RULE_ID_TO_CWE`
+lookup.
+**Tech:** stdlib string method (`str.rsplit`).
+**Fits in:** ONLINE — a semgrep-output-shape adapter.
+
+#### `_map_to_unit(units, file, line) -> Unit | None`
+**Does:** Finds which ingested `Unit` a semgrep finding's `(file, line)`
+falls inside — resolves both paths for a reliable comparison, then among
+all units whose range contains `line`, picks the one with the smallest
+`end_lineno - lineno` (the innermost, most specific match, since nested
+functions' ranges overlap their enclosing function's). Returns `None` if
+no unit contains the line (e.g. module-level code).
+**Talks to:** Called by `_semgrep_findings` for every raw semgrep hit.
+**Tech:** stdlib `pathlib.Path.resolve`.
+**Fits in:** ONLINE — attributes a static finding to a function.
+
+#### `_semgrep_findings(target, units) -> list[Finding]`
+**Does:** Runs `run_semgrep_on_path(target)` once, then turns each raw
+hit into a `Finding` with `source="semgrep"`, `confidence=1.0`
+(deterministic pattern match — no gate applies), and a short hardcoded
+`fix_hint` from `_SHORT_FIX_HINT`. Drops any finding whose base rule id
+isn't in `_RULE_ID_TO_CWE` — a ruleset/pipeline drift bug (someone added
+a semgrep rule without updating the map), not a property of the scanned
+code, so it's silently excluded here but would be caught immediately by
+any test that adds a rule without updating the map.
+**Talks to:** Calls `oracles/semgrep_oracle.py::run_semgrep_on_path`,
+`_base_rule_id`, `_map_to_unit`. Called by `run_scan`.
+**Fits in:** ONLINE — the static pre-pass stage.
+
+#### `_rank_and_gate(units, model_dir) -> tuple[list[Finding], int, int]`
+**Does:** Loads `model.joblib` + `calibration.json` via
+`research/artifacts.py::load_artifacts`, scores every unit with
+`R2Ranker.score`, then applies the certified gate: `score >= t_hat` →
+auto-approved (no `Finding` emitted — the certificate is what stands
+behind that unit's safety, not a report line); otherwise escalated as a
+`Finding` with `source="model"`, `cwe="UNSPECIFIED"`, `severity="REVIEW"`,
+`confidence=1 - score`. `calib.t_hat is None` (uncertified) escalates
+every unit — the gate's documented behavior when calibration couldn't
+certify any threshold at all. Returns `([], 0, 0)` immediately for an
+empty unit list rather than loading the model at all.
+**Talks to:** Calls `research/artifacts.py::load_artifacts`,
+`ranker/r2_embedding_lr.py::R2Ranker.score`. Called by `run_scan`. Its
+`FileNotFoundError` (no trained model) propagates up with
+`"codegate calibrate"` in the message — the same actionable-error pattern
+as `cli.py::info`.
+**Tech:** `pandas.DataFrame` (the ranker's expected input shape).
+**Fits in:** ONLINE — the rank + gate stages, and the only place
+`model.joblib`/`calibration.json` are read from the scan side.
+
+#### `run_scan(path, model_dir=DEFAULT_MODEL_DIR) -> ScanResult`
+**Does:** The public entry point: `ingest_path(path)` →
+`_semgrep_findings` → `_rank_and_gate`, findings from both stages merged
+and sorted by `(file, line)`. **Hard invariant, stated in the docstring
+and proven by test:** nothing on this path imports or calls
+`oracles/sandbox.py`, `sqli_oracle.py`, or `cmdi_oracle.py` — those
+detonation oracles execute code specifically to judge LLM-generated
+training samples under controlled conditions; `run_scan` scans arbitrary
+user code, and executing it would be the scanner exceeding its mandate.
+**Talks to:** Calls `scan/ingest.py::ingest_path`, `_semgrep_findings`,
+`_rank_and_gate`. Will be called by `cli.py::scan` once Phase 7 gives it
+a report formatter to hand results to.
+**Fits in:** ONLINE — the whole scan pipeline in one call.
+
+**Verified against the repo's own `src/` tree**: 70 units, 62
+auto-approved, 8 escalated, 0 semgrep findings (command run this
+session). Proven not to execute scanned code via a sentinel-file test
+(`tests/test_scan_pipeline.py::test_scan_never_executes_the_scanned_code`).
+
+---
+
 ## Not yet written
 
-Phases 5–7 and 9 will each add a section here, in the same commit as the
+Phases 6–7 and 9 will each add a section here, in the same commit as the
 code:
-- **Phase 5** — `scan/pipeline.py`, `scan/findings.py`: ingest → static →
-  rank → gate wiring
 - **Phase 6** — `scan/verifier.py`: escalation LLM call, content-hash cache
 - **Phase 7** — `report/pdf.py`, `report/remediation.py`,
   `report/accounting.py`, `report/json_sarif.py`

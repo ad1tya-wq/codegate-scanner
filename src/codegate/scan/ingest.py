@@ -18,6 +18,7 @@ class Unit:
     out-of-distribution and the certificate wouldn't transfer."""
     file: Path
     lineno: int
+    end_lineno: int  # needed to map a line-based finding back to its unit
     func_name: str
     source: str
     content_hash: str   # drives Phase 6's verifier cache
@@ -106,6 +107,7 @@ def _ingest_files(paths: list[Path]) -> IngestResult:
             units.append(Unit(
                 file=path,
                 lineno=node.lineno,
+                end_lineno=node.end_lineno if node.end_lineno is not None else node.lineno,
                 func_name=node.name,
                 source=func_source,
                 content_hash=hashlib.sha256(func_source.encode()).hexdigest(),

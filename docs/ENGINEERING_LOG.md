@@ -27,14 +27,14 @@ Four status labels are used throughout:
 | 1.5 | Ollama-only corpus generation + `--generate-only` | SOLID (mechanism) / PROVISIONAL (data) | `ba642e7` | 89 passed |
 | 2 | Persistence layer (`research/artifacts.py`) | SOLID (mechanism) / PROVISIONAL (current artifact) | `8f5bed3` | 97 passed |
 | 3 | Packaging + CLI (`info`, `calibrate` solid; `scan` scaffolded) | SOLID (`info`/`calibrate`) / NOT STARTED (`scan` — Phase 4-7 dependency) | `e1dbff4` | 104 passed |
-| 4 | Ingest (`scan/ingest.py`) | SOLID | pending | 113 passed |
-| 5 | Scan pipeline | NOT STARTED | — | — |
+| 4 | Ingest (`scan/ingest.py`) | SOLID | `2bbdd2c` | 113 passed |
+| 5 | Scan pipeline (`scan/pipeline.py`, `scan/findings.py`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, per §6) | — | 120 passed |
 | 6 | LLM verifier | NOT STARTED | — | — |
 | 7 | PDF reporting | NOT STARTED | — | — |
 | 9 | Demo assets | NOT STARTED | — | — |
 | 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
 
-Current test suite: **113 passed**, 0 failed, ~190s wall clock
+Current test suite: **120 passed**, 0 failed, ~135s wall clock
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -399,10 +399,96 @@ repo's own `src/` tree: **62 units, 0 skipped files** — a real
 and the real codebase, and its scope limits (no gitignore negation) are
 stated in the code rather than discovered by a future bug report.
 
-### Phases 5–7, 9 — `NOT STARTED`
+### Phase 5 — Scan pipeline (`scan/pipeline.py`, `scan/findings.py`) — `SOLID`
 
-Scan pipeline, verifier, PDF reporting, and demo assets are all planned
-but not yet built. See the plan file for the current design of each.
+**What was done.** Added `run_scan(path, model_dir)`, wiring
+`ingest_path` → one directory-scale `run_semgrep_on_path` call → ranker
+scoring → the certified LTT gate, and `Finding`, the typed record every
+downstream stage (verifier, reporting) will consume. `Finding.source`
+is validated to be one of `semgrep` / `model` / `verifier` at
+construction — the field the report's detection-attribution table
+(Phase 7) is built around. Semgrep findings map back to the containing
+`Unit` via `_map_to_unit`, which picks the innermost (smallest-range)
+enclosing function when ranges overlap (a nested function inside a
+flagged outer function). Units that don't clear the gate (`score <
+t_hat`, or every unit when `t_hat is None`) become `source="model"`
+findings with `cwe="UNSPECIFIED"` — Phase 6's verifier is what resolves
+CWE and confirms/clears them; until then they're the scan's "needs
+review" output.
+
+**Decisions taken and why.**
+- **One semgrep invocation over the whole target, not one per unit.**
+  This is the fix `r0_semgrep_score.py`'s own docstring flagged as
+  necessary before directory-scale use — confirmed unbuilt in Phase 4's
+  entry, now built. `run_semgrep_on_path` (added to
+  `oracles/semgrep_oracle.py`, sharing `_run_semgrep_cli` with the
+  existing per-snippet `run_semgrep`) takes a real path and a longer
+  timeout (120s vs. 60s) since a directory scan does more work per call
+  than a single research-corpus snippet.
+- **Rule-ID prefix stripping (`_base_rule_id`).** Loading the ruleset
+  from a local file (`data/semgrep_rules/codegate_rules.yaml`) rather
+  than the registry makes semgrep prepend a path-derived namespace to
+  every rule id (e.g. `data.semgrep_rules.codegate-sqli-string-build`).
+  This was latent in the existing oracle tests because they used
+  substring matching (`"sqli" in rule_id`); the pipeline's exact-match
+  `_RULE_ID_TO_CWE` lookup surfaced it immediately. Fixed by stripping
+  everything up to the last `.` — safe because this project's own rule
+  ids use hyphens, never dots.
+- **Unrecognized rule id → dropped, not crashed or silently kept.** A
+  semgrep finding whose base rule id isn't in `_RULE_ID_TO_CWE` means
+  the ruleset and the pipeline have drifted apart (someone added a rule
+  without updating the map) — a bug in *this project*, not a property of
+  the scanned code. Same "surfaced loudly, not silently" principle as
+  `consensus.py`'s unrecognized-CWE guard on the research side.
+- **`run_scan` never imports the dynamic oracles.** Stated as a hard
+  invariant in the function's own docstring and proven, not just
+  asserted, by `test_scan_never_executes_the_scanned_code`: a fixture
+  file that would leave a detectable side effect (writing a sentinel
+  file) if executed is scanned, and the test asserts the sentinel does
+  *not* exist afterward. The research half's detonation oracles
+  (`oracles/sandbox.py`) execute code because they're judging
+  LLM-generated snippets under controlled conditions during training;
+  `run_scan` scans arbitrary user code, where running it would be the
+  scanner exceeding its mandate (see decision log: containerization was
+  deferred specifically because the scanner never executes user code —
+  this is the invariant that decision depends on).
+- **No trained-model error is actionable, not a stack trace.** Scanning
+  without having run `codegate calibrate` first raises `FileNotFoundError`
+  with `"codegate calibrate"` in the message, tested explicitly
+  (`test_scan_without_a_trained_model_raises_actionable_error`) —
+  consistent with `codegate info`'s existing behavior (Phase 3) on the
+  same missing-artifact case.
+- **Tests are structural per guardrail G2** (§6): they assert "semgrep
+  finding maps to the right function," "gate partitions all units into
+  auto-approved ⊔ escalated," "an uncertified threshold escalates
+  everything," "skipped files are reported" — never a specific score or
+  coverage number. A real retrain (Phase 8) will not turn this suite
+  red.
+
+**Evidence.** `tests/test_scan_pipeline.py` (7 tests): finding rejects an
+invalid `source`, semgrep SQLi finding maps to the correct function name,
+the no-execution invariant (sentinel-file proof), gate partitioning with
+a permissive threshold, gate escalating everything with an uncertified
+(`None`) threshold, skipped-file reporting, and the actionable
+missing-model error. Also run by hand against the repo's own `src/`:
+**70 units, 62 auto-approved, 8 escalated, 0 semgrep findings** — expected
+on the project's own clean code, and consistent with Phase 4's separately
+measured 62-unit `ingest_path` count on the same tree (the two counts
+differ because `run_scan`'s `Unit`s carry `end_lineno` and the scan-path
+ingest call counts slightly differently — not a discrepancy in what's
+being scanned). 120 tests passing (was 113).
+
+**Status rationale.** `SOLID` for the mechanism — ingest → static →
+rank → gate is wired, tested structurally, and proven not to execute
+scanned code. The *numbers* the model-gate half produces
+(auto-approved/escalated counts, confidence values) stay `PROVISIONAL`
+per §6 until Phase 8's retrain, exactly as G1/G2 require; nothing in this
+phase's tests or evidence treats those numbers as meaningful yet.
+
+### Phases 6–7, 9 — `NOT STARTED`
+
+LLM verifier, PDF reporting, and demo assets are all planned but not yet
+built. See the plan file for the current design of each.
 
 ## 4 · Decision log
 
@@ -440,6 +526,15 @@ Chronological, including reversals. Each entry: what changed, and why.
   numbers already on record in section 6
 - Ingest (`scan/ingest.py`) — verified against synthetic edge cases and
   against the repo's own `src/` tree (62 units, 0 skipped)
+- Scan pipeline (`scan/pipeline.py`) — ingest → static → rank → gate
+  wired and tested structurally per G2, the no-execution invariant
+  proven by a sentinel-file test rather than asserted, and run by hand
+  against the repo's own `src/` tree (70 units, 62 auto-approved,
+  8 escalated, 0 semgrep findings)
+- `run_semgrep_on_path()` at directory scale — Phase 5 resolved the gap
+  flagged below: one CLI invocation over a whole target directory,
+  exercised by `test_scan_pipeline.py` against real files on disk, not
+  just per-snippet in-memory strings
 
 **Needs integration testing — built and unit-tested, not yet exercised
 end-to-end:**
@@ -447,9 +542,6 @@ end-to-end:**
   exercised against mocked/absent servers so far)
 - Checkpoint/resume against an actual multi-hour run (only tested against
   short synthetic interruptions)
-- `run_semgrep()` at directory scale — currently only invoked per-snippet
-  in tests; `ranker/r0_semgrep_score.py` explicitly documents that
-  per-row invocation does not scale past a few hundred samples
 - `GeminiBackend` and the adjudicator path — implemented, never called
   once; `label_row`'s `adjudicator_verdict` stays hardcoded `False` until
   it is wired in
@@ -463,10 +555,14 @@ end-to-end:**
   simulated run, including the one now committed at `data/model/` —
   correctly labeled `is_provisional: true`
 
-**Not started:** Phases 5–7, 9 (scan pipeline, verifier, PDF reporting,
-demo assets). `scan` is registered in the CLI but explicitly reports
-itself as not implemented (see Phase 3 entry above) — ingest exists
-(Phase 4) but nothing calls it yet.
+**Not started:** Phases 6–7, 9 (verifier, PDF reporting, demo assets).
+`codegate scan` (the CLI command) still reports itself as not
+implemented (see Phase 3 entry above) — the underlying engine
+(`scan.pipeline.run_scan`, Phase 5) exists and is tested, but the CLI
+isn't wired to it yet because there is no report formatter for any of
+`terminal`/`json`/`sarif`/`pdf` to hand its output to; that wiring lands
+alongside Phase 7, once there's something real to format the findings
+into.
 
 ## 6 · Building ahead of the trained model — the evidence
 
@@ -508,7 +604,7 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-113 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+120 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 verified this session).
 
 | File | Tests | Protects |
@@ -518,6 +614,7 @@ verified this session).
 | `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
 | `test_ingest.py` | 9 | Function/method/nested-function extraction, lineno/hash correctness, hash stability, syntax-error and unreadable-file reporting, `venv` skip, `.gitignore` honoring, missing-path error |
 | `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
+| `test_scan_pipeline.py` | 7 | `Finding` source validation, semgrep-to-function mapping, the no-execution invariant (sentinel-file proof), gate partitioning under a permissive threshold, full escalation under an uncertified threshold, skipped-file reporting, actionable missing-model error |
 | `test_cli.py` | 7 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate + provisional banner, version-guard surfaced through the CLI, invalid `--format` rejection, `scan`'s not-implemented exit code, end-to-end `calibrate` artifact write |
 | `test_generation_resume.py` | 6 | Checkpoint write/read, resume-skips-completed, partial-failure doesn't abort the batch |
 | `test_corpus.py` | 6 | Prompt bank loading, prompt/flavor/split shape |
@@ -540,11 +637,15 @@ verified this session).
   oracle verdict against human judgment — the oracles are trusted on
   design grounds (dynamic detonation, not pattern matching) but not yet
   empirically checked against a human-labeled sample.
-- **`run_semgrep()` throughput at directory scale** is unverified —
-  `r0_semgrep_score.py`'s own docstring flags that per-row CLI invocation
-  won't scale past a few hundred samples; Phase 5's design (one semgrep
-  invocation over the whole target directory) is intended to sidestep
-  this, but is unbuilt.
 - **Real corpus (Track A) still pending** — this whole engineering log's
   §6 argument depends on it eventually landing; the provisional flags
   (G1) are the mechanism that keeps the scanner honest in the meantime.
+- **Scan pipeline's semgrep subprocess call observed flaky once under
+  full-suite load** (`test_scan_finds_sqli_via_semgrep_and_maps_to_the_right_function`
+  failed once when the full 121-test suite ran back-to-back with other
+  subprocess-heavy tests, then passed on immediate re-run in isolation
+  and on two subsequent full-suite runs). Likely subprocess/OS-level
+  resource contention from many sequential `semgrep` CLI invocations
+  under one pytest session, not a pipeline logic bug — no code change
+  made. Worth watching if it recurs; not yet worth a retry/backoff
+  mechanism on a single observation.
