@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -19,4 +20,11 @@ def test_dry_run_script_completes_and_produces_artifacts(tmp_path):
     assert (out_dir / "frontier.png").exists()
     assert (out_dir / "shift_results.csv").exists()
     assert (out_dir / "shift_results.png").exists()
+    assert (out_dir / "model.joblib").exists()
+    assert (out_dir / "calibration.json").exists()
     assert "CODEGATE DRY RUN SUMMARY" in proc.stdout
+
+    calib = json.loads((out_dir / "calibration.json").read_text())
+    assert calib["is_provisional"] is True
+    assert calib["corpus_version"] == "simulated-v2"
+    assert calib["ranker_id"] == "R2"

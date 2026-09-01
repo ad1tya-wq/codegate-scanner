@@ -18,6 +18,12 @@ def _embed(code_series: pd.Series) -> np.ndarray:
 
 
 class R2Ranker:
+    # Identifies this ranker's fit/score contract to a persisted calibration
+    # (research/artifacts.py) -- bump if that contract ever changes
+    # incompatibly, so a stale calibration.json is rejected instead of
+    # silently paired with a model it wasn't calibrated against.
+    RANKER_ID = "R2"
+
     def __init__(self, random_seed: int = 0):
         self._random_seed = random_seed
         self._model: LogisticRegression | None = None

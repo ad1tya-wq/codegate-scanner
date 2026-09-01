@@ -25,7 +25,7 @@ Four status labels are used throughout:
 | 0 | New repo + migration | SOLID | `5712ea3` | baseline green |
 | 1 | Fix the foundation (4 defects) | SOLID | `b84e2c9` | 89 passed |
 | 1.5 | Ollama-only corpus generation + `--generate-only` | SOLID (mechanism) / PROVISIONAL (data) | `ba642e7` | 89 passed |
-| 2 | Persistence layer (`research/artifacts.py`) | NOT STARTED | — | — |
+| 2 | Persistence layer (`research/artifacts.py`) | SOLID (mechanism) / PROVISIONAL (current artifact) | `e894152`+ | 97 passed |
 | 3 | Packaging + CLI | NOT STARTED (entry point declared, module absent) | — | — |
 | 4 | Ingest | NOT STARTED | — | — |
 | 5 | Scan pipeline | NOT STARTED | — | — |
@@ -34,7 +34,7 @@ Four status labels are used throughout:
 | 9 | Demo assets | NOT STARTED | — | — |
 | 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
 
-Current test suite: **89 passed**, 0 failed, ~86s wall clock
+Current test suite: **97 passed**, 0 failed, ~80s wall clock
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -215,11 +215,63 @@ sanity-checked — see §6.
 
 ---
 
-### Phases 2–7, 9 — `NOT STARTED`
+### Phase 2 — Persistence layer — mechanism `SOLID`, current artifact `PROVISIONAL`
 
-Persistence, packaging/CLI, ingest, scan pipeline, verifier, PDF
-reporting, and demo assets are all planned but not yet built. See the plan
-file for the current design of each. `pyproject.toml` already declares
+**What was done.** Added `research/artifacts.py`: `save_model`/`load_model`
+(model.joblib via `joblib`), `save_calibration`/`load_calibration`
+(calibration.json via stdlib `json`), and `load_artifacts` — a combined
+loader that enforces the version guard the plan called for.
+
+**Decisions taken and why.**
+- **Version guard via a class attribute on the ranker, not a hardcoded
+  string in the artifacts module.** Added `R2Ranker.RANKER_ID = "R2"`
+  (`ranker/r2_embedding_lr.py`) and made `save_calibration`'s `ranker_id`
+  default to it, so the calibration's recorded ranker identity can't drift
+  from what actually produced the scores. `load_artifacts` raises
+  `ArtifactVersionError` if a loaded calibration's `ranker_id` doesn't
+  match the loaded model's — tested directly
+  (`test_load_artifacts_rejects_ranker_id_mismatch`).
+- **G1 (provisional flagging) implemented by deriving from the existing
+  `is_simulated` flag, not a new parameter.** `run_full_pipeline` already
+  receives `is_simulated`; it was already the caller's signal for "is this
+  real data." `corpus_version = "simulated-v2" if is_simulated else
+  "real-540"`, `is_provisional = is_simulated`
+  (`research/pipeline.py`, right after the operating `LTTResult` is
+  computed). No new call-site parameters needed at `scripts/run_real.py`
+  or `scripts/run_pipeline_dry_run.py`.
+- **Wired directly into `run_full_pipeline`, not left as an unused
+  module.** The plan named persistence a "hard blocker — no tool without
+  this"; a persistence *module* nobody calls doesn't close that blocker.
+  `save_model`/`save_calibration` are now called in the same branch that
+  already computes the certified operating point, so every full pipeline
+  run (simulated dry run today, the eventual real run) writes
+  `model.joblib` + `calibration.json` to `out_dir` as a side effect,
+  matching the layout `codegate scan`/`codegate info` (Phase 3) will
+  expect.
+
+**Evidence.** `tests/test_artifacts.py` (8 tests): round-trip for both
+model and calibration, missing-file error messages, the `None`-`t_hat`
+(uncertified) case, and the version-guard rejection. Extended
+`tests/test_dry_run.py` to assert the full pipeline actually produces
+`model.joblib` and `calibration.json`, and that the written
+`calibration.json` has `is_provisional: true`, `corpus_version:
+"simulated-v2"`, `ranker_id: "R2"` — i.e. this is checked against a real
+subprocess run of the pipeline, not just the unit-level round trip. 89 → 97
+tests passing.
+
+**Status rationale — split, same reasoning as Phase 1.5.** The persistence
+*mechanism* is `SOLID`: it round-trips correctly, the version guard is
+tested to actually reject a mismatch, and it's wired into the real
+pipeline rather than sitting unused. The *artifact it currently produces*
+is `PROVISIONAL` because it's trained on the simulated corpus — which is
+exactly what `is_provisional: true` in the written file now states
+outright, closing the loop on G1's purpose.
+
+### Phases 3–7, 9 — `NOT STARTED`
+
+Packaging/CLI, ingest, scan pipeline, verifier, PDF reporting, and demo
+assets are all planned but not yet built. See the plan file for the
+current design of each. `pyproject.toml` already declares
 `[project.scripts] codegate = "codegate.cli:app"` (Phase 0 migration) even
 though `cli.py` does not exist yet — `pip install -e .` succeeds today,
 but the installed `codegate` command will fail on invocation until Phase 3
@@ -254,6 +306,8 @@ Chronological, including reversals. Each entry: what changed, and why.
 - Checkpoint/resume for generation — survives interruption, verified
   deterministic across runs
 - Phase 0 migration — zero test regressions carried into the new repo
+- Persistence round trip (`research/artifacts.py`) — model + certificate
+  save/load, version guard tested against an actual mismatch
 
 **Needs integration testing — built and unit-tested, not yet exercised
 end-to-end:**
@@ -273,9 +327,11 @@ end-to-end:**
   not real, samples — see §6 for the measured evidence this is still safe
   to build the scanner against)
 - Any coverage/frontier number computed from the simulated corpus
+- The `model.joblib`/`calibration.json` pair currently on disk from any
+  simulated run — correctly labeled `is_provisional: true`
 
-**Not started:** Phases 2–7, 9 (persistence, CLI, ingest, scan pipeline,
-verifier, PDF reporting, demo assets).
+**Not started:** Phases 3–7, 9 (CLI, ingest, scan pipeline, verifier, PDF
+reporting, demo assets).
 
 ## 6 · Building ahead of the trained model — the evidence
 
@@ -317,7 +373,7 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-89 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+97 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 verified this session).
 
 | File | Tests | Protects |
@@ -325,6 +381,7 @@ verified this session).
 | `test_oracles.py` | 21 | Core oracle contracts: `function_exists`, sandbox execution/timeout/exit-code capture, SQLi/cmdi/creds detection on fixtures, consensus rule (all four branches), semgrep hit/clear on fixtures |
 | `test_oracle_robustness.py` | 15 | The SQLi table-name abstention-defect class specifically — parametrized over 7+ table names, plus the sink-shortcut correctness tests |
 | `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
+| `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
 | `test_generation_resume.py` | 6 | Checkpoint write/read, resume-skips-completed, partial-failure doesn't abort the batch |
 | `test_corpus.py` | 6 | Prompt bank loading, prompt/flavor/split shape |
 | `test_risk.py` | 5 | `empirical_risk`, Clopper-Pearson interval edge cases |
@@ -334,7 +391,7 @@ verified this session).
 | `test_eval.py` | 4 | Cost-coverage frontier computation, generator-shift experiment |
 | `test_config.py` | 4 | Config loading, role-reuse (adjudicator-in-generators) rejection, split-ratio validation |
 | `test_env.py` | 3 | `.env` loading, required-vs-optional variable handling |
-| `test_dry_run.py` | 1 | Full simulated pipeline runs end-to-end without raising |
+| `test_dry_run.py` | 1 | Full simulated pipeline runs end-to-end without raising, and produces every artifact including `model.joblib`/`calibration.json` with the correct provisional flags |
 
 ## 8 · Known risks & open questions
 

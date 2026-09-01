@@ -14,6 +14,7 @@ from codegate.oracles.creds_oracle import check_creds
 from codegate.oracles.consensus import consensus_label, CONSENSUS_RULE_VERSION
 from codegate.ranker.r2_embedding_lr import R2Ranker
 from codegate.gate.ltt import calibrate_threshold
+from codegate.research.artifacts import save_calibration, save_model
 from codegate.research.eval.frontier import compute_frontier
 from codegate.research.eval.shift import run_shift_experiment
 from codegate.research.eval.plots import plot_frontier, plot_shift_results
@@ -214,6 +215,22 @@ def run_full_pipeline(
         ).to_csv(out_dir / "ltt_trace.csv", index=False)
         summary["t_hat"] = operating.t_hat
         summary["coverage"] = operating.coverage
+
+        # Persist the model and its certificate together -- no scanner
+        # without this. is_simulated is currently the only signal for
+        # whether the underlying corpus is real: a run trained on the
+        # simulated corpus is provisional by definition (see
+        # docs/ENGINEERING_LOG.md guardrail G1), regardless of how the
+        # certificate itself turned out.
+        corpus_version = "simulated-v2" if is_simulated else "real-540"
+        is_provisional = is_simulated
+        save_model(ranker, out_dir / "model.joblib")
+        save_calibration(
+            operating, out_dir / "calibration.json",
+            corpus_version=corpus_version, is_provisional=is_provisional,
+        )
+        summary["corpus_version"] = corpus_version
+        summary["is_provisional"] = is_provisional
     else:
         pd.DataFrame({"alpha": [], "t_hat": [], "coverage": [], "n_vuln_calib": []}).to_csv(
             out_dir / "frontier.csv", index=False

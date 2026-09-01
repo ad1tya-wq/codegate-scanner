@@ -1,0 +1,113 @@
+import json
+import pandas as pd
+import pytest
+from codegate.gate.ltt import LTTResult
+from codegate.ranker.r2_embedding_lr import R2Ranker
+from codegate.research.artifacts import (
+    ArtifactVersionError,
+    load_artifacts,
+    load_calibration,
+    load_model,
+    save_calibration,
+    save_model,
+)
+
+
+def _fitted_ranker() -> R2Ranker:
+    gens = pd.DataFrame({
+        "sample_id": ["s1", "s2"],
+        "code": [
+            "def f(conn, u):\n    return conn.execute(\"SELECT * FROM t WHERE c='\" + u + \"'\")\n",
+            "def f(conn, u):\n    return conn.execute('SELECT * FROM t WHERE c=?', (u,))\n",
+        ],
+    })
+    labels = pd.Series([1, 0], index=gens.index)
+    return R2Ranker(random_seed=0).fit(gens, labels)
+
+
+def _ltt_result(t_hat: float | None = 0.5) -> LTTResult:
+    return LTTResult(
+        t_hat=t_hat, alpha=0.05, delta=0.05, n_vuln_calib=10, coverage=0.6,
+        trace=[(1.0, 0, 0.001, True), (0.5, 1, 0.02, True)],
+    )
+
+
+def test_save_and_load_model_round_trips(tmp_path):
+    ranker = _fitted_ranker()
+    path = tmp_path / "model.joblib"
+    save_model(ranker, path)
+    loaded = load_model(path)
+
+    gens = pd.DataFrame({"sample_id": ["s1"], "code": ["def f(x):\n    return x\n"]})
+    pd.testing.assert_frame_equal(ranker.score(gens), loaded.score(gens))
+
+
+def test_load_model_missing_file_raises_actionable_error(tmp_path):
+    with pytest.raises(FileNotFoundError, match="codegate calibrate"):
+        load_model(tmp_path / "does_not_exist.joblib")
+
+
+def test_save_and_load_calibration_round_trips(tmp_path):
+    path = tmp_path / "calibration.json"
+    save_calibration(
+        _ltt_result(), path, corpus_version="simulated-v2", is_provisional=True,
+    )
+    calib = load_calibration(path)
+
+    assert calib.t_hat == 0.5
+    assert calib.alpha == 0.05
+    assert calib.delta == 0.05
+    assert calib.n_vuln_calib == 10
+    assert calib.ranker_id == "R2"
+    assert calib.corpus_version == "simulated-v2"
+    assert calib.is_provisional is True
+    assert calib.created_at  # non-empty timestamp string
+
+
+def test_calibration_file_is_readable_json_with_expected_keys(tmp_path):
+    path = tmp_path / "calibration.json"
+    save_calibration(_ltt_result(), path, corpus_version="real-540", is_provisional=False)
+    raw = json.loads(path.read_text())
+    assert set(raw) == {
+        "t_hat", "alpha", "delta", "n_vuln_calib", "ranker_id",
+        "corpus_version", "is_provisional", "created_at",
+    }
+    assert raw["is_provisional"] is False
+
+
+def test_save_calibration_handles_uncertified_none_t_hat(tmp_path):
+    path = tmp_path / "calibration.json"
+    save_calibration(_ltt_result(t_hat=None), path, corpus_version="simulated-v2", is_provisional=True)
+    calib = load_calibration(path)
+    assert calib.t_hat is None
+
+
+def test_load_calibration_missing_file_raises_actionable_error(tmp_path):
+    with pytest.raises(FileNotFoundError, match="codegate calibrate"):
+        load_calibration(tmp_path / "does_not_exist.json")
+
+
+def test_load_artifacts_returns_matching_pair(tmp_path):
+    ranker = _fitted_ranker()
+    model_path = tmp_path / "model.joblib"
+    calib_path = tmp_path / "calibration.json"
+    save_model(ranker, model_path)
+    save_calibration(_ltt_result(), calib_path, corpus_version="simulated-v2", is_provisional=True)
+
+    loaded_ranker, loaded_calib = load_artifacts(model_path, calib_path)
+    assert loaded_ranker.RANKER_ID == "R2"
+    assert loaded_calib.ranker_id == "R2"
+
+
+def test_load_artifacts_rejects_ranker_id_mismatch(tmp_path):
+    ranker = _fitted_ranker()
+    model_path = tmp_path / "model.joblib"
+    calib_path = tmp_path / "calibration.json"
+    save_model(ranker, model_path)
+    save_calibration(
+        _ltt_result(), calib_path,
+        corpus_version="simulated-v2", is_provisional=True, ranker_id="R0",
+    )
+
+    with pytest.raises(ArtifactVersionError, match="R0"):
+        load_artifacts(model_path, calib_path)

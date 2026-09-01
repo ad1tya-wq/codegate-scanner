@@ -58,10 +58,10 @@ would be auto-approved at `t_hat`), and `trace` (the full per-threshold
 search history — `(threshold, k, p_value, certified)` tuples, the audit
 evidence behind `t_hat`).
 **Talks to:** Constructed only by `calibrate_threshold`. Consumed by
-`research/pipeline.py` (writes `trace` to `ltt_trace.csv`), and will be
-consumed by Phase 2's `save_calibration` once persistence exists.
+`research/pipeline.py` (writes `trace` to `ltt_trace.csv`, and passes the
+whole result to `research/artifacts.py::save_calibration`).
 **Tech:** stdlib `dataclasses`.
-**Fits in:** OFFLINE — calibration artifact, pre-persistence.
+**Fits in:** OFFLINE — calibration artifact, now persisted (Phase 2).
 
 ### `gate/risk.py`
 
@@ -288,13 +288,14 @@ matching the LTT gate's `score >= t_hat` convention. `score` raises
 `RuntimeError` if called before `fit`.
 **Talks to:** Constructed and used by
 `research/pipeline.py::run_full_pipeline` (the single coupling point:
-`research/pipeline.py:184`). This is the class whose output eventually
-gets persisted to `model.joblib` in Phase 2, and whose one-file coupling
-surface is why swapping the interim model for the real-corpus model is a
-file replacement, not a code change (see `ENGINEERING_LOG.md` §6).
+`research/pipeline.py:184`). This is the class whose fitted instance gets
+persisted to `model.joblib` via `research/artifacts.py::save_model`
+(Phase 2), and whose one-file coupling surface is why swapping the
+interim model for the real-corpus model is a file replacement, not a code
+change (see `ENGINEERING_LOG.md` §6).
 **Tech:** `sklearn.linear_model.LogisticRegression`, `numpy`, `pandas`.
 **Fits in:** OFFLINE (training) — the resulting fitted model then serves
-ONLINE scoring once Phase 2/5 exist.
+ONLINE scoring once Phase 5 exists.
 
 ---
 
@@ -668,13 +669,81 @@ research machine actually invokes.
 
 ---
 
+## `research/artifacts.py` — persistence (Phase 2)
+
+The layer that gets the trained model and its certificate onto disk
+together, so the tool can run without recalibrating from scratch every
+time.
+
+#### `Calibration` (frozen dataclass)
+**Does:** The certificate, as persisted: `t_hat`, `alpha`, `delta`,
+`n_vuln_calib`, `ranker_id` (which model this was calibrated against),
+`corpus_version`, `is_provisional` (G1's honesty flag — see
+`ENGINEERING_LOG.md` §6), `created_at`.
+**Talks to:** Constructed by `save_calibration`; returned by
+`load_calibration`/`load_artifacts`. Will be read by `codegate info`
+(Phase 3) and the PDF cover banner (Phase 7).
+**Tech:** stdlib `dataclasses`.
+**Fits in:** the persisted bridge between OFFLINE calibration and ONLINE
+scanning.
+
+#### `ArtifactVersionError(ValueError)`
+**Does:** Raised when a loaded calibration's `ranker_id` doesn't match the
+loaded model's — the version guard.
+**Talks to:** Raised only by `load_artifacts`.
+**Fits in:** guards the OFFLINE→ONLINE handoff.
+
+#### `save_model(ranker, path) -> None` / `load_model(path) -> R2Ranker`
+**Does:** `joblib.dump`/`joblib.load` for an `R2Ranker`, to/from
+`model.joblib`. `load_model` raises a clear `FileNotFoundError` (pointing
+at `codegate calibrate`) if the file is absent, and `TypeError` if the
+file doesn't contain an `R2Ranker`.
+**Talks to:** `save_model` is called by
+`research/pipeline.py::run_full_pipeline` once a certified threshold
+exists. `load_model` is called by `load_artifacts`.
+**Tech:** `joblib`.
+**Fits in:** OFFLINE writes it (training), ONLINE reads it (scanning,
+once Phase 5 exists).
+
+#### `save_calibration(result, path, corpus_version, is_provisional, ranker_id=R2Ranker.RANKER_ID) -> None` / `load_calibration(path) -> Calibration`
+**Does:** Serializes an `LTTResult` plus provenance metadata to
+`calibration.json` (pretty-printed) / reads it back. `ranker_id` defaults
+to the active ranker's own `RANKER_ID` class attribute, so it can't drift
+from what actually produced the scores.
+**Talks to:** `save_calibration` is called by
+`research/pipeline.py::run_full_pipeline` right after
+`gate/ltt.py::calibrate_threshold` produces the operating-point
+`LTTResult`. `load_calibration` is called by `load_artifacts`.
+**Tech:** stdlib `json`, `datetime`.
+**Fits in:** OFFLINE writes it, ONLINE reads it.
+
+#### `load_artifacts(model_path, calibration_path) -> (R2Ranker, Calibration)`
+**Does:** Loads both files and raises `ArtifactVersionError` if
+`calibration.ranker_id != ranker.RANKER_ID` — the version guard named in
+the plan ("refuse a calibration whose `ranker_id` ≠ the loaded model's").
+This is the function anything that needs a *consistent* model+certificate
+pair should call, rather than `load_model`/`load_calibration`
+independently.
+**Talks to:** Calls `load_model`, `load_calibration`. Will be called by
+Phase 3's `codegate scan`/`codegate info`.
+**Tech:** none beyond its two callees.
+**Fits in:** the guarded ONLINE entry point for loading trained artifacts.
+
+**How `is_provisional`/`corpus_version` get set today:** `run_full_pipeline`
+derives both from its existing `is_simulated` flag —
+`corpus_version = "simulated-v2" if is_simulated else "real-540"`,
+`is_provisional = is_simulated` — rather than taking them as new
+parameters, since `is_simulated` was already the caller's signal for
+"is this real data." (`research/pipeline.py`, in the `n_vuln_calib > 0`
+branch, right after the operating `LTTResult` is computed.)
+
+---
+
 ## Not yet written
 
-Phases 2–7 and 9 will each add a section here, in the same commit as the
+Phases 3–7 and 9 will each add a section here, in the same commit as the
 code:
 
-- **Phase 2** — `research/artifacts.py`: `save_model`/`load_model`,
-  `save_calibration`/`load_calibration`
 - **Phase 3** — `cli.py`: `codegate scan/info/calibrate`
 - **Phase 4** — `scan/ingest.py`: directory walk → AST function-level units
 - **Phase 5** — `scan/pipeline.py`, `scan/findings.py`: ingest → static →
