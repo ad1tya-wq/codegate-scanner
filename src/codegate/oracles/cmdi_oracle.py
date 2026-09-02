@@ -51,9 +51,9 @@ def check_cmdi(code: str, function_name: str) -> bool | None:
         harness = f"""
 try:
     {function_name}({payload_host!r})
+    print("CODEGATE_DONE")
 except Exception as e:
     print(f"CODEGATE_ERROR={{type(e).__name__}}")
-print("CODEGATE_DONE")
 """
         full_source = code + "\n" + harness
         result = run_sandboxed(full_source, harness="", timeout_s=5.0)
