@@ -8,6 +8,7 @@ from codegate.scan.verifier import (
     GroqVerifierBackend,
     VerifierResult,
     build_verifier_backend,
+    is_cached,
     to_finding,
     verify_unit,
     _parse_verdict,
@@ -98,6 +99,36 @@ def test_verify_unit_second_call_hits_cache_not_the_backend(tmp_path):
     second = verify_unit(_unit(), backend=backend, cache_dir=tmp_path)
     assert first == second
     assert backend.calls == 1  # second call served entirely from cache
+
+
+def test_is_cached_false_when_no_cache_file_exists(tmp_path):
+    assert is_cached("abc123", cache_dir=tmp_path) is False
+
+
+def test_is_cached_true_for_a_valid_cache_entry(tmp_path):
+    raw = '{"vulnerable": true, "cwe": "CWE-89", "line": 2, "reason": "x", "fix_hint": "y"}'
+    verify_unit(_unit(), backend=_StubBackend(raw), cache_dir=tmp_path)
+    assert is_cached("abc123", cache_dir=tmp_path) is True
+
+
+def test_is_cached_false_for_a_corrupted_cache_file(tmp_path):
+    # Regression: is_cached() used to only check Path.exists(), while
+    # verify_unit() checked existence AND parseability via _load_cached().
+    # A cache file that exists but fails to parse (corrupted mid-write, or
+    # written by an older version with a different VerifierResult shape)
+    # made is_cached() report True while verify_unit() actually fell
+    # through to a real, billed backend call -- silently misclassifying a
+    # paid call as a free cache hit in scan/pipeline.py's cost accounting.
+    (tmp_path / "abc123.json").write_text("not valid json{{{")
+    assert is_cached("abc123", cache_dir=tmp_path) is False
+
+    # And verify_unit, given the same corrupted file, must actually call
+    # the backend rather than silently trusting the broken cache entry --
+    # proving the two functions now agree.
+    backend = _StubBackend('{"vulnerable": true, "cwe": "CWE-89", "line": 1, "reason": "x", "fix_hint": "y"}')
+    result = verify_unit(_unit(), backend=backend, cache_dir=tmp_path)
+    assert backend.calls == 1
+    assert result.vulnerable is True
 
 
 def test_to_finding_maps_fields_and_tags_source_verifier():

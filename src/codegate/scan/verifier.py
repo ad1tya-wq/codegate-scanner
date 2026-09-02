@@ -148,16 +148,6 @@ def _cache_path(cache_dir: Path, content_hash: str) -> Path:
     return cache_dir / f"{content_hash}.json"
 
 
-def is_cached(content_hash: str, cache_dir: Path = DEFAULT_CACHE_DIR) -> bool:
-    """
-    Whether `verify_unit` would resolve this content_hash without a fresh
-    LLM call. Exposed so callers (report/accounting.py) can count cache
-    hits vs. fresh calls for the token/cost savings estimate without
-    duplicating the cache's file-naming scheme.
-    """
-    return _cache_path(cache_dir, content_hash).exists()
-
-
 def _load_cached(cache_dir: Path, content_hash: str) -> VerifierResult | None:
     path = _cache_path(cache_dir, content_hash)
     if not path.exists():
@@ -170,6 +160,24 @@ def _load_cached(cache_dir: Path, content_hash: str) -> VerifierResult | None:
         return VerifierResult(**data)
     except TypeError:
         return None
+
+
+def is_cached(content_hash: str, cache_dir: Path = DEFAULT_CACHE_DIR) -> bool:
+    """
+    Whether `verify_unit` would resolve this content_hash without a fresh
+    LLM call. Exposed so callers (scan/pipeline.py's accounting) can count
+    cache hits vs. fresh calls for the token/cost savings estimate without
+    duplicating the cache's file-naming scheme.
+
+    Delegates to `_load_cached` rather than a bare `.exists()` check --
+    a cache file can exist but fail to load (corrupted mid-write, or
+    written by an older version with a different VerifierResult shape),
+    in which case `verify_unit` falls through to a real, billed LLM call
+    despite the file being present. `is_cached` must agree with that
+    outcome, or a caller counting hits vs. calls for cost accounting
+    silently misclassifies a paid call as a free cache hit.
+    """
+    return _load_cached(cache_dir, content_hash) is not None
 
 
 def _save_cache(cache_dir: Path, content_hash: str, result: VerifierResult) -> None:
