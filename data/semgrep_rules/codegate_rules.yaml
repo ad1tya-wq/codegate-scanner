@@ -36,6 +36,14 @@ rules:
               $QUERY = f"..."
               ...
               $CONN.execute($QUERY)
+          - pattern: |
+              $QUERY = "..." % $X
+              ...
+              $CONN.execute($QUERY)
+          - pattern: |
+              $QUERY = "...".format(...)
+              ...
+              $CONN.execute($QUERY)
 
   - id: codegate-cmdi-shell-true
     languages: [python]

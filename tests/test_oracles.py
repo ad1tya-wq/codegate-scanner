@@ -152,3 +152,23 @@ def test_run_semgrep_flags_cmdi_vulnerable_fixture():
 def test_run_semgrep_clears_cmdi_safe_fixture():
     result = run_semgrep(_read("cmdi_safe.py"))
     assert result["hit"] is False
+
+
+def test_run_semgrep_flags_deferred_percent_format_query():
+    # Regression: found 2026-09-02 scanning a real public codebase
+    # (anxolerd/dvpwa's sqli/dao/student.py) -- the two-step
+    # "$QUERY = ... % ...; ...; $CONN.execute($QUERY)" pattern existed
+    # for string concatenation (+) and f-strings, but not for %-style
+    # formatting, even though the single-expression inline case
+    # ($CONN.execute("..." % $X)) was already covered. A real,
+    # unparameterized SQL injection using old-style % formatting on a
+    # separate line from the execute() call went completely undetected.
+    code = (
+        "def create(conn, name):\n"
+        "    q = (\"INSERT INTO students (name) \"\n"
+        "         \"VALUES ('%(name)s')\" % {'name': name})\n"
+        "    conn.execute(q)\n"
+    )
+    result = run_semgrep(code)
+    assert result["hit"] is True
+    assert any("sqli" in f["rule_id"] for f in result["findings"])
