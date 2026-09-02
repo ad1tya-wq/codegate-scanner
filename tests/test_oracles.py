@@ -46,6 +46,34 @@ def test_sandbox_captures_nonzero_exit():
     assert "boom" in result.stderr
 
 
+def test_sandbox_kills_grandchild_processes_on_timeout():
+    # Regression: found for real 2026-09-02 -- a Track A retraining run
+    # hung 56+ minutes at under 1s of accumulated CPU time. subprocess
+    # .run(timeout=...)'s TimeoutExpired handling only kills the DIRECT
+    # child; on Windows it then retries communicate() with NO timeout at
+    # all. A sandboxed function that shells out (exactly what the cmdi
+    # detonation payload's target function does) spawns a grandchild
+    # that survives the direct-child kill and keeps stdout/stderr pipes
+    # open -- the retry then blocks forever waiting for EOF on a pipe
+    # nothing will ever close. This test reproduces the exact shape: the
+    # sandboxed script spawns a long-lived grandchild (inheriting stdout)
+    # and then hangs itself past the timeout.
+    code = (
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "time.sleep(30)\n"
+    )
+    import time as _time
+    started = _time.monotonic()
+    result = run_sandboxed(code, harness="", timeout_s=1.0)
+    elapsed = _time.monotonic() - started
+    assert result.timed_out
+    # Generous upper bound (kill overhead + the bounded 2s reap), but
+    # nowhere near the grandchild's real 30s sleep -- proves the whole
+    # tree was killed, not just waited out.
+    assert elapsed < 15.0
+
+
 def test_check_sqli_detects_vulnerable_fixture():
     code = _read("sqli_vuln.py")
     assert check_sqli(code, function_name="get_user") is True
