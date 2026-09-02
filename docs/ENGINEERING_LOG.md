@@ -33,7 +33,7 @@ Four status labels are used throughout:
 | 7 | Reporting + CLI wiring (`report/`, `codegate scan`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, cost estimates, per §6) | — | 176 passed |
 | 9 | Demo assets (`examples/vulnerable_app/`) | SOLID | — | 177 passed |
 | — | Evaluation & metrics (`research/eval/metrics.py`, `scripts/run_eval.py`) | SOLID (mechanism) / PROVISIONAL (ranker-quality numbers, per §6) | — | 187 passed |
-| 8 | Retrain on real corpus (join point) | BLOCKED on Track A (teammate's Ollama run) | — | — |
+| 8 | Retrain on real corpus (join point) | ATTEMPTED on Track A's 516-sample corpus, found 3 real bugs, **not yet certifiable** (§11) — shipped model stays `simulated-v2` | `13d8b83`–`8ea9d39` | 201 passed |
 
 Current test suite: **187 passed**, 0 failed, ~390s wall clock
 (`python -m pytest tests/ -q`, verified this session).
@@ -779,6 +779,9 @@ Chronological, including reversals. Each entry: what changed, and why.
 | 9 | Corpus scale: 1,620 samples (3 per prompt) → **540 (1 per prompt)** | Keeps the unattended Track A run to ~2–5h on CPU; scaling up is deferred until the first 540-sample loop proves out end to end |
 | 10 | `cli.py`'s eager `from codegate.research.pipeline import run_full_pipeline` → **lazy-imported inside `calibrate()`**; `semgrep` moved from the `research` optional extra → **core `dependencies`** | Found while setting up CI (§9): `research/pipeline.py` imports `research/eval/plots.py`, which imports `matplotlib` unconditionally — a dependency declared only under `[research]`. Because `cli.py` imported `run_full_pipeline` at module top level, *every* `codegate` command, including `scan`, crashed with `ModuleNotFoundError` on a plain `pip install -e .` (no extras) — directly breaking the project's own "fresh clone works with zero setup" promise and the plan's clean-room acceptance criterion. `semgrep` had the milder version of the same problem: `scan/pipeline.py`'s static pre-pass needs it, but it lived under `research` too, so a base install would silently produce zero static findings with no warning. Verified the fix in a fresh venv: `pip install -e .` (base only) followed by `codegate info` and `codegate scan examples/vulnerable_app --no-llm --format pdf` both now succeed |
 | 11 | Verifier model `llama-3.3-70b-versatile` → **`openai/gpt-oss-120b`** (`scan/verifier.py::_GROQ_MODEL_IDS`) | Found live, 2026-09-02, the first time `GROQ_API_KEY` was ever set and a real scan ran with the verifier on: every call 404'd. `GET /openai/v1/models` against the same key confirmed the model is no longer in Groq's catalog at all — deprecated/removed with no in-band warning. `verify_unit`'s degrade-to-`None` design meant this failed safely (findings fell back to "needs review," no crash), but verification was silently non-functional until diagnosed with a direct API probe. Fixed by remapping to `openai/gpt-oss-120b`, verified live on a real vulnerable-code sample (clean, correctly-classified JSON on the first call) and then end-to-end: re-scanning `examples/vulnerable_app` with the verifier enabled correctly confirmed both real vulnerabilities and cleared all three of the provisional model's false positives (precision 0.50 → 1.00 on that target). Also found and fixed the actual cause of the confusion along the way: `.env` had a second, empty `GROQ_API_KEY=` line after the real one, which `python-dotenv` was resolving to (last value wins on a duplicate key) — the key was correctly set by the user throughout, dotenv was just reading the wrong line |
+| 12 | `research/pipeline.py::extract_code()` added — real chat-model completions extracted from markdown fences, `[PYTHON]` tags, and `<pre>` tags before labeling | Found the moment Track A's real 516-sample corpus (branch `nikhil`) was labeled for the first time: 40.7% oracle abstention. Real models wrap code in prose and delimiters `SimulatedBackend` never produces; `ast.parse()` on the raw text failed, so the dynamic oracles' function-name search fell back to template names real models never use. Extraction alone cut abstention to 20.3%; a second delimiter style (`[PYTHON]`/`<pre>`, codellama-specific) found by inspecting the remaining failures cut it further to 17.8% |
+| 13 | `oracles/cmdi_oracle.py`'s harness — success marker moved inside the `try` block, no longer printed unconditionally | Found by manually eyeballing "safe"-labeled vulnerable-flavor CWE-78 samples from the real corpus: textbook `shell=True` + f-string command injection was labeled `False` (safe). The harness's `print("CODEGATE_DONE")` sat *after* the try/except, so a `TypeError` from calling a real, multi-parameter function with the harness's fixed single-argument call still printed the "done" marker — `check_cmdi` then reported "ran, no sentinel" (safe) instead of "call itself failed" (unknown). Same defect class as the original SQLi table-name bug, this time in a different oracle and triggered by signature diversity, not table names. Re-labeling with the fix raised abstention from 17.8% to 28.3% — a large swing, but a *correct* one: most of what moved was mislabeled-safe becoming honestly-abstained, not the reverse |
+| 14 | `oracles/sandbox.py::run_sandboxed` — switched from `subprocess.run(timeout=...)` to `Popen` + a new process group/session + explicit tree kill on timeout | The real corpus retraining run hung for 56+ minutes at under 1 second of accumulated parent CPU time — confirmed hung, not slow, via `tasklist`/`wmic`, not assumed. Root cause: `subprocess.run`'s Windows timeout path kills only the direct child, then retries `communicate()` with no timeout at all; a cmdi-vulnerable sample's function shelling out to something that blocks (git/tar/nslookup-style commands appear throughout the real corpus) leaves a grandchild holding stdout/stderr pipes open forever. Fixed with `CREATE_NEW_PROCESS_GROUP` (Windows) / `start_new_session` (POSIX) plus `taskkill /T /F` (or `os.killpg`) on timeout, and a *bounded* post-kill reap so a still-stuck cleanup can never hang the caller again. Regression test reproduces the exact shape and passes in ~3s despite the grandchild's real 30s sleep |
 
 ## 5 · Confidence assessment
 
@@ -1102,3 +1105,91 @@ downstream of ranker quality (score distribution, separation, LTT
 trace), for the same reason as every other model-dependent number in
 this log (§6) — plus the additional, explicitly-flagged caveat that the
 AUC figure specifically isn't computed on held-out data yet.
+
+## 11 · Phase 8 attempt: retraining on the real corpus (2026-09-02)
+
+Track A delivered a real 516-sample corpus (branch `nikhil`, commit
+`a9bc464`, generations from `qwen2.5-coder:7b`, `deepseek-coder:6.7b`,
+`codellama:7b`, `starcoder2:7b`) as `data/runs/real_540/generations.parquet`.
+This section documents what happened when it was actually run through
+the pipeline — not what was planned, what was measured.
+
+**Three real, distinct bugs were found and fixed** running this corpus
+through the existing labeling/training path for the first time (decisions
+#12–14, §4): a markdown/delimiter extraction gap in `research/pipeline.py`
+(real chat models wrap code in prose CodeGate's oracles couldn't parse),
+a silent false-safe defect in `oracles/cmdi_oracle.py`'s detonation
+harness (the same defect class as the original SQLi table-name bug,
+newly triggered by real signature diversity), and a process-hang defect
+in `oracles/sandbox.py` (a 56-minute hang, confirmed via `tasklist`/`wmic`,
+caused by an orphaned grandchild process from a `shell=True` call
+surviving a Windows subprocess timeout). All three are fixed, tested, and
+merged to `main`; none were reachable by the simulated corpus, which is
+exactly why building the pipeline ahead of real data (§6) was the right
+call — it meant these surfaced against real data instead of shipping
+silently broken.
+
+**With all three fixes applied, the corpus labels honestly:**
+
+```
+n generated                 : 516
+abstention rate              : 28.3% (146/516)
+vulnerable rate (decided)    : 10.0%
+calibration set              : 115 samples, 8 vulnerable
+t_hat at alpha = 0.05 / 0.10 / 0.20 / 0.30  : None / None / None / None
+coverage at every alpha tested              : 0.0%
+```
+
+**LTT could not certify a threshold at any alpha tested, up to 30%.**
+This is not a bug — the abstention rate is understood and explained
+(§10's evidence for the extraction/harness fixes), and everywhere it was
+checked by hand, abstention correctly meant "genuinely unjudgeable,"
+not silently-mislabeled. The problem is sample size: only 8 vulnerable
+samples reached the calibration split, and LTT's finite-sample guarantee
+needs more evidence than that to certify even a loose bound with 95%
+confidence. Two compounding causes: (1) the corpus's vulnerable-flavor
+prompts often produced safe code anyway — some models write parameterized
+queries or `shell=False` even when asked for the vulnerable version,
+which the project's own plan flagged as an expected possibility, not a
+defect; (2) the two oracle fixes above correctly *reduced* the vulnerable
+count further by re-abstaining samples that were previously (wrongly)
+labeled safe rather than unknown.
+
+**Decision (2026-09-02, user directive):** `data/model/` stays on the
+`simulated-v2` artifacts. They are the only artifacts that currently
+certify a working, non-trivial threshold and demonstrate the full gate
+mechanism end to end; the real-540 attempt, left as the shipped model,
+would certify nothing and escalate 100% of every scan. The real-540
+labeled/scored artifacts are preserved at `data/runs/real_540_retrain/`
+for reference. This is a sample-size problem to solve with more data
+(the plan's own scale-up step, 540 → 1,620 samples, is now a measured
+necessity rather than a nice-to-have) or a rebalanced calibration split,
+not a mechanism problem — the certificate math, the labeling pipeline,
+and the sandbox are all now proven correct against real, messy,
+independently-generated code, which the simulated corpus alone could
+never have demonstrated.
+
+**A second, unrelated but serious incident during this work:** an early
+training invocation (before the process-hang fix, and before `--out-dir`
+was being passed deliberately) wrote directly to `data/model/`, silently
+overwriting the committed `simulated-v2` artifacts with the uncertified
+real-540 ones for a period during this session. Caught by `codegate info`
+printing `t_hat: none` unexpectedly while preparing a demo. Recovered
+cleanly via `git checkout -- data/model/model.joblib data/model/calibration.json`
+(the two files are the only git-tracked contents of that directory,
+exactly so this kind of recovery is possible), then `codegate calibrate`
+was re-run to regenerate the non-tracked auxiliary files
+(`labeled.parquet`, `scores_r2.parquet`, `ltt_trace.csv`, and the eval
+plots) — verified byte-for-byte identical to the original (`t_hat`
+reproduced to the same float, `created_at` the only diff) because the
+simulated corpus generation is fully deterministic. No data was
+permanently lost, but it is a direct argument for always passing an
+explicit, non-default `--out-dir` on any exploratory training run,
+never the canonical `data/model/` path, until a result is deliberately
+being promoted.
+
+**Evidence.** `data/runs/real_540_retrain/` holds the full labeled/scored
+real-540 artifacts. `data/eval/real540_snapshot/` holds the metrics.json
+and plots computed against them, kept separate from `data/eval/`'s
+plots (which reflect the shipped `simulated-v2` model, regenerated and
+re-verified after the recovery above).
