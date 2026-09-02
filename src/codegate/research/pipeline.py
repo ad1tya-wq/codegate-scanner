@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,54 @@ _SIM_CANDIDATE_FN_NAMES = ["handler", "process", "run_task", "do_work"]
 LABEL_VULNERABLE = 1
 LABEL_SAFE = 0
 LABEL_ABSTAIN = -1
+
+
+# Real chat-style models (unlike SimulatedBackend) wrap code in some kind
+# of delimiter, with prose narration around it -- verified empirically
+# 2026-09-02 against the real Track A corpus, which uses three different
+# delimiter styles depending on the generator: standard markdown fences
+# (```python ... ``` or bare ``` ... ```, qwen2.5-coder/deepseek-coder/
+# codellama), square-bracket tags ([PYTHON] ... [/PYTHON], codellama), and
+# HTML-style tags (<pre> ... </pre>, codellama). Without extraction,
+# ast.parse() on the raw text raises SyntaxError on the prose,
+# _first_function_name returns None, and the dynamic oracles fall back to
+# SimulatedBackend's four template names -- which real models essentially
+# never use -- so every dynamic-oracle CWE (89, 78) abstains almost
+# entirely on exactly the flavors (vulnerable, near_miss) that need
+# detonation to judge. Measured on the real 516-sample corpus: 40.7%
+# overall abstention before markdown-fence extraction alone; the
+# additional [PYTHON]/<pre> delimiters accounted for a further slice of
+# codellama's abstentions once fenced blocks stopped being the bottleneck.
+_DELIMITER_PATTERNS = [
+    re.compile(r"```(?:python)?\n?(.*?)```", re.DOTALL),
+    re.compile(r"\[PYTHON\]\n?(.*?)\[/PYTHON\]", re.DOTALL | re.IGNORECASE),
+    re.compile(r"<pre>\n?(.*?)</pre>", re.DOTALL | re.IGNORECASE),
+]
+_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+\w+\s*\(", re.MULTILINE)
+
+
+def extract_code(raw: str) -> str:
+    """
+    Pulls the actual implementation out of a real LLM's delimiter-wrapped
+    completion (markdown fences, [PYTHON]/[/PYTHON] tags, or <pre> tags --
+    see the module-level comment above for why all three are needed).
+    Returns the first delimited block that defines a function -- not just
+    the first one found, since some models (codellama, observed in the
+    real corpus) emit a second block that's a usage example, not the
+    implementation, and picking the wrong one would hand the oracle
+    example-call code instead of the function definition it needs to
+    detonate. Falls back to `raw` unchanged if no delimited block
+    contains a `def` -- covers both a model that emits bare code with no
+    wrapping at all (starcoder2, observed in the real corpus) and a model
+    that emits no usable code at all (also observed: a genuine non-answer
+    that should legitimately abstain downstream, not be forced into a
+    false extraction).
+    """
+    for pattern in _DELIMITER_PATTERNS:
+        for block in pattern.findall(raw):
+            if _DEF_RE.search(block):
+                return block
+    return raw
 
 
 def _first_function_name(code: str) -> str | None:
@@ -125,6 +174,7 @@ def run_full_pipeline(
     out_dir: Path,
     use_semgrep_and_adjudicator: bool = False,
     checkpoint_path: Path | None = None,
+    pregenerated_df: pd.DataFrame | None = None,
 ) -> dict:
     """
     Generation -> oracle labeling -> consensus -> R2 ranking -> LTT
@@ -135,17 +185,37 @@ def run_full_pipeline(
 
     `checkpoint_path` makes generation resumable -- essential for the
     multi-hour Ollama runs, harmless for the simulated dry run.
+
+    `pregenerated_df` skips the generation step entirely and labels/trains
+    directly on an already-generated DataFrame (same shape `run_generation`
+    produces) -- the receiving half of docs/OLLAMA_SETUP.md's
+    "host runs generation, ships back generations.parquet" workflow.
+    `prompts`/`backends` are still required arguments but go unused in
+    this path.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     summary: dict = {}
 
-    gen_df = run_generation(
-        prompts, backends,
-        samples_per_prompt=cfg.samples_per_prompt,
-        is_simulated=is_simulated,
-        checkpoint_path=checkpoint_path,
-    )
+    if pregenerated_df is not None:
+        gen_df = pregenerated_df
+    else:
+        gen_df = run_generation(
+            prompts, backends,
+            samples_per_prompt=cfg.samples_per_prompt,
+            is_simulated=is_simulated,
+            checkpoint_path=checkpoint_path,
+        )
     validate_dataframe(gen_df, "generations")
+
+    # Real chat-style models wrap code in markdown with prose narration
+    # around it; extract_code() is a no-op on SimulatedBackend's already-
+    # clean output (no fence found -> falls back to the raw string
+    # unchanged), so this runs unconditionally rather than branching on
+    # is_simulated -- one code path for both, see extract_code()'s
+    # docstring for the abstention-rate evidence this fixes.
+    gen_df = gen_df.copy()
+    gen_df["code"] = gen_df["code"].map(extract_code)
+
     gen_df.to_parquet(out_dir / "generations.parquet")
     summary["n_generated"] = len(gen_df)
     print(f"Generated {len(gen_df)} snippets across {len(backends)} generators (is_simulated={is_simulated})")
