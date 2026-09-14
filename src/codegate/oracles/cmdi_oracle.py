@@ -65,24 +65,50 @@ def check_cmdi(code: str, function_name: str) -> bool | None:
 _fn = {function_name}
 _params = positional_params(_fn)
 _payload = {payload_host!r}
+
+
+def _reached_a_spawn(args):
+    # True when the call got as far as trying to start a process.
+    try:
+        _fn(*args)
+        return True
+    except FileNotFoundError:
+        # The process could not be spawned because the target binary is
+        # absent. That is itself evidence of SAFE behaviour: it can only
+        # happen on the argv / shell=False path, because shell=True execs a
+        # shell and a shell always exists (verified on this platform --
+        # shell=True returns a non-zero exit code for a missing binary and
+        # never raises). Without this, every near-miss sample calling a tool
+        # the labelling machine lacks -- ffmpeg, gzip, git -- abstains.
+        return True
+    except Exception:
+        return False
+
+
 _observed = False
 
 if not _params:
     # Nothing to inject into; the function takes no input at all.
-    print("CODEGATE_NOEVIDENCE")
+    pass
 else:
+    # Control run first, with benign arguments. Near-miss code validates its
+    # input and rejects the payload outright (a regex whitelist raising
+    # ValueError is the canonical safe shape), so without a control run the
+    # oracle never observes it doing anything and abstains -- which
+    # discarded 33 of 58 CWE-78 near-miss samples in the real-540 corpus,
+    # exactly the samples that teach the ranker what safe-but-alarming code
+    # looks like.
+    _benign = [benign_value_for(p.name) for p in _params]
+    if _reached_a_spawn(_benign):
+        _observed = True
+
     for _i in range(len(_params)):
-        _args = [benign_value_for(p.name) for p in _params]
+        _args = list(_benign)
         _args[_i] = _payload
-        try:
-            _fn(*_args)
+        if _reached_a_spawn(_args):
             _observed = True
-        except Exception:
-            pass
-    if _observed:
-        print("CODEGATE_DONE")
-    else:
-        print("CODEGATE_NOEVIDENCE")
+
+print("CODEGATE_DONE" if _observed else "CODEGATE_NOEVIDENCE")
 """
         full_source = code + "\n" + harness
         # Raised from 5s: the harness now makes one call per parameter

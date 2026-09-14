@@ -1194,3 +1194,177 @@ real-540 artifacts. `data/eval/real540_snapshot/` holds the metrics.json
 and plots computed against them, kept separate from `data/eval/`'s
 plots (which reflect the shipped `simulated-v2` model, regenerated and
 re-verified after the recovery above).
+
+## 12 · Oracle repair: the calibration failure was the labeller, not the corpus size (2026-09-14)
+
+Section 11 closed by attributing the `t_hat = None` result to sample size
+and prescribing a bigger corpus. **That diagnosis was wrong**, or at least
+badly incomplete. Re-measuring the real-540 corpus and testing the oracles
+directly found four defects in the labeller, three of them putting *wrong
+labels* into the corpus rather than merely dropping samples.
+
+### 12.1 · What was actually broken
+
+**Defect A — both dynamic harnesses called functions with a fixed arity.**
+`sqli_oracle` called `f(conn, PAYLOAD)`, exactly two arguments;
+`cmdi_oracle` called `f(payload)`, exactly one. Any generated function with
+a different signature raised `TypeError` and abstained. 7 of 15 SQLi task
+groups and 6 of 15 cmdi task groups ask for other signatures — about 44% of
+the dynamic prompt bank, structurally incapable of ever producing a label.
+Measured on the real corpus, vulnerable flavor only:
+
+| CWE-89 (harness sent 2 args) | ABSTAIN | SAFE | VULN |
+|---|---|---|---|
+| prompts requesting 2 params | 13 | 14 | 4 |
+| prompts requesting 3 params | 19 | 0 | **0** |
+| prompts requesting 4 params | 7 | 1 | **0** |
+
+| CWE-78 (harness sent 1 arg) | ABSTAIN | SAFE | VULN |
+|---|---|---|---|
+| prompts requesting 1 param | 5 | 7 | 22 |
+| prompts requesting 2 params | 17 | 2 | **0** |
+| prompts requesting 3 params | 3 | 0 | **0** |
+
+Every vulnerable label in the entire CWE-78 corpus came from a
+one-argument prompt.
+
+**Defect B — the SQLi oracle judged by row count**, so it could only see
+injections that widened a `SELECT`. Verified by direct test against the
+pre-fix oracle:
+
+```
+2-arg injectable SELECT           -> True    (correct)
+3-arg injectable SELECT           -> None    (defect A)
+2-arg injectable DELETE           -> False   FALSE NEGATIVE
+2-arg SAFE parameterized COUNT(*) -> True    FALSE POSITIVE
+```
+
+`COUNT(*)` always returns exactly one row, so every parameterized
+aggregate read as vulnerable. Two of the four CWE-89 `near_miss` samples
+labelled VULN in the real corpus were the *correctly parameterized*
+version of `count_by_category` — measurable label noise in the training
+set. Of 15 SQLi task groups, only three ever produced a vulnerable label.
+
+**Defect C — the creds oracle gated on Shannon entropy > 3.0.** Direct
+test: `hunter2` (2.81), `letmein` (2.52), `P@ssw0rd` (2.75), `admin123`
+(3.00) and `s3cr3t` (2.25) were all rejected; five of nine realistic
+secrets. Real passwords are low-entropy by nature, which is what makes
+them bad passwords, not what makes them safe.
+
+**Defect D — `check_creds` returned `False` on unparseable input.** A model
+that answered with prose instead of code was recorded as *safe*. This is
+the same silent-failure path as decision #2 ("abstention is not safety"),
+surviving in a third place, and it is why CWE-798 reported exactly **zero**
+abstentions across 516 samples — a number that should have looked
+suspicious on its face. `check_creds` now returns `bool | None`.
+
+### 12.2 · The arithmetic nobody had done
+
+LTT certifies iff `binom.cdf(k, n, alpha) <= delta`. Even in the best case
+(`k = 0`, no vulnerable sample above the threshold), the minimum
+`n_vuln_calib` is:
+
+| alpha | minimum n |
+|---|---|
+| 0.05 | **59** |
+| 0.10 | 29 |
+| 0.20 | 14 |
+| 0.30 | **9** |
+
+The run had **8**. It missed the loosest bound tested by a single sample.
+Headroom matters too: at n = 59 the certificate dies if even one vulnerable
+sample scores above `t_hat`. Tolerance at alpha = 0.05 is `k <= 1` at
+n = 100, `k <= 2` at n = 150, `k <= 4` at n = 200. The working target is
+therefore **n_vuln_calib >= 120**, not 59.
+
+### 12.3 · What the repairs recovered, measured on the same 516 samples
+
+`scripts/relabel.py` re-runs the oracles over an existing
+`generations.parquet`, so an oracle change is measured against real data
+without regenerating anything. Reproduce with:
+
+```bash
+python scripts/relabel.py --generations data/runs/real_540/generations.parquet \
+                          --out-dir data/runs/real_540_relabeled --no-semgrep
+```
+
+| | before | after |
+|---|---|---|
+| abstention rate | 28.3% | 24.4% |
+| vulnerable rate (decided) | 10.0% | 17.7% |
+| **n_vuln_calib** | **8** | **24** |
+| CWE-78 vulnerable -> VULN | 22 / 56 | **38 / 56** |
+| CWE-89 vulnerable -> VULN | 4 / 58 | **21 / 58** |
+| CWE-798 vulnerable -> VULN | 9 / 58 | 10 / 58 |
+| CWE-89 near_miss -> VULN (label noise) | 2 | **0** |
+| CWE-798 near_miss -> VULN (label noise) | 0 | **0** |
+
+**Three times the usable calibration evidence from the identical corpus.**
+No new generation. The `near_miss` and `neutral` flavors produce zero
+vulnerable labels across all three CWEs, which is the check that the
+repairs did not simply loosen the oracles into flagging everything.
+
+Two mechanisms were added to the harnesses and both earned their place:
+
+- **A benign control run** precedes the payload runs in both dynamic
+  oracles, so a `SAFE` verdict rests on having *observed* the function
+  execute rather than on the absence of a crash. Near-miss code validates
+  its input and rejects the payload outright — a regex whitelist raising
+  `ValueError` is the canonical safe shape — so without a control run the
+  oracle sees nothing and abstains. This alone accounted for 33 of 58
+  CWE-78 near-miss samples.
+- **`FileNotFoundError` counts as evidence of safety** in the cmdi oracle.
+  It can only arise on the `shell=False` path, because `shell=True` execs a
+  shell and a shell always exists (verified: `shell=True` returns a
+  non-zero exit code for a missing binary and never raises). Without it,
+  every near-miss sample invoking a tool the labelling machine lacks —
+  `ffmpeg`, `gzip`, `git` — abstained. That was an environment artifact
+  masquerading as unjudgeable code.
+
+### 12.4 · An over-correction, caught and reverted
+
+The first creds repair added a name-independent sweep flagging any literal
+of 20+ characters with entropy above 3.5. It immediately produced **three
+false positives in the CWE-798 `near_miss` flavor**: it was flagging
+`https://thirdpartyapi.com` and MongoDB connection strings. Near-miss
+samples are precisely the ones that teach the ranker to separate
+alarming-looking safe code from the real thing, so poisoning them is worse
+than missing a positive. The sweep was removed; only the unambiguous
+`AKIA[0-9A-Z]{16}` key shape remains name-independent.
+
+This is recorded because it is the failure mode this section is otherwise
+about: loosening a detector until the numbers improve. The gate that caught
+it was checking `near_miss` and `neutral` yield, not the headline count.
+
+### 12.5 · What is still short, and why it is not a sample-size problem either
+
+`n_vuln_calib` is **24** against a target of 120. Two causes, both
+identified, neither solved by generating more samples against the current
+setup:
+
+1. **The sqlite3 fixture cannot execute Postgres-style code.** 19 of the 25
+   remaining CWE-89 vulnerable abstentions are models writing `psycopg2`
+   idiom — `%s` paramstyle, `with conn.cursor() as cur:` — which sqlite3
+   rejects, so no statement is ever prepared and the trace callback sees
+   nothing. Fixing this needs a recording DB-API shim that accepts both
+   paramstyles and captures the SQL string as passed to `execute()`,
+   rather than relying on SQLite having successfully prepared it.
+2. **The CWE-798 vulnerable prompts do not produce hardcoded secrets.** The
+   models are trained not to write them: asked to hardcode a password they
+   write `password = "your_password"`, `YOUR_API_KEY`,
+   `Bearer <hardcoded_api_key>`. These are placeholders and are correctly
+   labelled safe — the prompt bank's own near-miss for task 003 uses a
+   placeholder fallback as a *safe* shape, so calling placeholders
+   vulnerable would collide two flavors. The fix is in the prompt, which
+   must pin the literal ("written directly as the string literal
+   `hunter2`"), not in the oracle.
+
+A third, smaller gap: `check_creds` only inspects `ast.Assign` targets and
+`ast.keyword` arguments, so a secret passed positionally —
+`jwt.encode(payload, "my_jwt_secret_key_12345")` — is missed. Matching the
+secret-name pattern against the literal's own text was considered and
+rejected as too false-positive-prone. Recorded as a known limitation.
+
+**Status:** oracle mechanism `SOLID` (89 oracle tests, including a
+ground-truth suite pinning every defect above). Corpus yield `NEEDS WORK` —
+the two causes in 12.5 come before any new generation run.

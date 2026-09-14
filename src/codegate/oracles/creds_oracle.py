@@ -7,9 +7,16 @@ _SECRET_NAME_PATTERN = re.compile(
     r"(password|passwd|secret|api_key|apikey|access_key|token|credential)", re.IGNORECASE
 )
 
+# Only unambiguous key shapes belong here, because this is the one check
+# that fires regardless of what the variable is called. A broader
+# "40 chars of base64" heuristic and a generic high-entropy sweep were both
+# tried and removed: measured against the real-540 corpus they flagged URLs
+# and MongoDB connection strings inside near-miss samples, which is the
+# worst possible false positive -- near-miss samples are precisely the ones
+# that teach the ranker to tell alarming-looking safe code from the real
+# thing, so poisoning them is worse than missing a positive.
 _KNOWN_KEY_PATTERNS = [
     re.compile(r"AKIA[0-9A-Z]{16}"),               # AWS access key id
-    re.compile(r"[A-Za-z0-9/+=]{40}"),               # AWS-secret-shaped base64 (heuristic)
 ]
 
 # Anything a developer would write to mean "not a real value". Matched as a
@@ -22,11 +29,6 @@ _PLACEHOLDER_MARKERS = (
 )
 
 _MIN_SECRET_LEN = 6
-# Entropy is no longer the gate for a secret-NAMED literal (see check_creds).
-# It survives only as an independent trigger for a long, random-looking
-# literal whose variable name gives nothing away.
-_HIGH_ENTROPY_THRESHOLD = 3.5
-_MIN_UNNAMED_SECRET_LEN = 20
 
 
 def _is_placeholder(literal: str) -> bool:
@@ -40,7 +42,7 @@ def _shannon_entropy(s: str) -> float:
     return -sum(p * math.log2(p) for p in probs)
 
 
-def check_creds(code: str) -> bool:
+def check_creds(code: str) -> bool | None:
     """
     Static-only oracle (no dynamic execution): flags a hardcoded credential
     when a string literal is assigned to, passed as, or defaulted for a
@@ -62,11 +64,20 @@ def check_creds(code: str) -> bool:
     The near-miss flavor reads from `os.environ`, which is a Call rather
     than a Constant and so never reaches any of these branches -- that is
     why loosening this rule does not put false positives into the corpus.
+
+    Returns None when the snippet does not parse. That is an abstention, not
+    a clearance: a model that answered with prose instead of code (observed
+    in the real corpus -- starcoder2 returned a paragraph describing the
+    function it was asked to write) tells us nothing about credentials, and
+    recording it as safe is the same silent-failure path that hid the
+    original CWE-89 table-name bug. It is also why CWE-798 showed exactly
+    zero abstentions across 516 real samples, which should have looked
+    suspicious on its face.
     """
     try:
         tree = ast.parse(code)
     except SyntaxError:
-        return False
+        return None
 
     for node in ast.walk(tree):
         name = None
@@ -107,23 +118,15 @@ def check_creds(code: str) -> bool:
                 if len(literal) >= _MIN_SECRET_LEN and not _is_placeholder(literal):
                     return True
 
-    # Finally, a name-independent sweep: a long, random-looking literal or
-    # one matching a known key shape is a hardcoded credential whatever the
-    # variable is called -- `k = "AKIA..."` still leaks the key. The length
-    # floor and the higher entropy bar keep ordinary prose and SQL strings
-    # out; this branch never fires on the short, guessable passwords the
-    # named branches above are there to catch.
+    # Finally, a name-independent sweep for literals whose *shape* is
+    # unmistakably a credential -- `k = "AKIA..."` still leaks the key
+    # whatever it is called.
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
             continue
-        literal = node.value
-        if _is_placeholder(literal):
+        if _is_placeholder(node.value):
             continue
-        if any(p.search(literal) for p in _KNOWN_KEY_PATTERNS):
-            return True
-        if (len(literal) >= _MIN_UNNAMED_SECRET_LEN
-                and " " not in literal
-                and _shannon_entropy(literal) > _HIGH_ENTROPY_THRESHOLD):
+        if any(p.search(node.value) for p in _KNOWN_KEY_PATTERNS):
             return True
 
     return False

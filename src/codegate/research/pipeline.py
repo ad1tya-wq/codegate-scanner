@@ -166,6 +166,38 @@ def label_row(row: pd.Series, use_semgrep_and_adjudicator: bool = False) -> dict
     }
 
 
+def relabel(gen_df: pd.DataFrame, use_semgrep: bool = True) -> pd.DataFrame:
+    """
+    Re-run the oracles over an already-generated corpus, returning a fresh
+    `labeled` frame.
+
+    Generation is the expensive half -- hours on a teammate's laptop --
+    while labelling is minutes. Whenever the oracles change, this measures
+    the effect against real data without regenerating anything, which is how
+    an oracle repair gets validated before a new corpus run is commissioned.
+
+    Applies `extract_code` first, exactly as `run_full_pipeline` does, so
+    the two paths cannot drift apart in how they read real model output.
+    """
+    df = gen_df.copy()
+    df["code"] = df["code"].map(extract_code)
+    return pd.DataFrame([
+        label_row(row, use_semgrep_and_adjudicator=use_semgrep)
+        for _, row in df.iterrows()
+    ])
+
+
+def label_summary(gen_df: pd.DataFrame, labeled_df: pd.DataFrame) -> pd.DataFrame:
+    """CWE x flavor x verdict crosstab -- the shape that makes an oracle
+    defect visible. A flavor whose verdicts are all one value is the
+    signature of an oracle that is not discriminating."""
+    merged = gen_df.merge(labeled_df[["sample_id", "label"]], on="sample_id")
+    merged["verdict"] = merged["label"].map({
+        LABEL_VULNERABLE: "VULN", LABEL_SAFE: "SAFE", LABEL_ABSTAIN: "ABSTAIN",
+    })
+    return pd.crosstab([merged["cwe"], merged["flavor"]], merged["verdict"])
+
+
 def run_full_pipeline(
     cfg: CodeGateConfig,
     prompts: list[Prompt],

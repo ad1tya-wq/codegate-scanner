@@ -213,6 +213,25 @@ def test_cmdi_oracle_abstains_when_the_function_is_absent():
     assert check_cmdi(VULN_CMDI_1ARG, "not_a_real_function") is None
 
 
+def test_cmdi_oracle_clears_argv_code_whose_binary_is_not_installed():
+    """
+    A missing binary raises FileNotFoundError only on the argv path --
+    shell=True execs a shell, which always exists. So the exception is
+    evidence the payload never reached a shell, not evidence of nothing.
+    Without this, every near-miss sample calling a tool the labelling
+    machine happens not to have installed abstains: 42 of 58 CWE-78
+    near-miss samples in the real-540 corpus.
+    """
+    code = (
+        "import subprocess\n"
+        "def resize_image(path, width, height):\n"
+        "    return subprocess.run(['ffmpeg', '-i', path, '-s',\n"
+        "                           f'{width}x{height}', 'out.png'],\n"
+        "                          shell=False, capture_output=True)\n"
+    )
+    assert check_cmdi(code, "resize_image") is False
+
+
 # --- CWE-798: hardcoded credentials ----------------------------------------
 
 
@@ -262,3 +281,37 @@ def test_creds_oracle_detects_a_secret_passed_as_a_keyword():
 ])
 def test_creds_oracle_clears_safe_code(code):
     assert check_creds(code) is False
+
+
+def test_creds_oracle_abstains_on_unparseable_output():
+    """
+    A model that answers with prose instead of code says nothing about
+    credentials. Recording that as safe is the silent-failure path that hid
+    the original CWE-89 table-name bug -- and it is why CWE-798 reported
+    exactly zero abstentions across 516 real samples.
+    """
+    prose = ("The function should take a single argument: the username for "
+             "the database account. It should return a connection object.")
+    assert check_creds(prose) is None
+
+
+@pytest.mark.parametrize("literal", [
+    # Regression: a generic high-entropy sweep flagged all of these inside
+    # near-miss samples in the real corpus. Near-miss samples are what teach
+    # the ranker to separate alarming-looking safe code from the real thing,
+    # so a false positive there is worse than a missed detection.
+    "https://thirdpartyapi.com",
+    "mongodb://{}:{}@localhost:27017/mydatabase",
+    "@cluster0.mongodb.net/test?retryWrites=true&w=majority",
+    "application/json",
+])
+def test_creds_oracle_does_not_flag_urls_and_connection_strings(literal):
+    code = f'def call():\n    url = {literal!r}\n    return url\n'
+    assert check_creds(code) is False
+
+
+def test_creds_oracle_still_flags_an_aws_key_under_an_innocuous_name():
+    # Not AWS's own AKIAIOSFODNN7EXAMPLE -- that contains "example" and is
+    # correctly treated as a placeholder.
+    code = 'def call():\n    k = "AKIA3B7KQ2MNXP4RTZ9W"\n    return k\n'
+    assert check_creds(code) is True
