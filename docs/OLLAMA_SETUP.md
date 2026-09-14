@@ -1,5 +1,15 @@
 # CodeGate — Corpus Generation Setup (Host Machine)
 
+> ## ⚠️ Superseded
+>
+> **This guide describes the 540-sample v1 run, completed 2026-09-02.** It is
+> kept for the record, and because its "Connectivity options" section below is
+> still the reference for the four ways to reach an Ollama host.
+>
+> **For the current run, follow [`CORPUS_GENERATION_GUIDE.md`](CORPUS_GENERATION_GUIDE.md).**
+> It is self-contained — it supersedes every step below, changes one of the
+> four models, and adds a mandatory pilot stage. Do not mix the two.
+
 **You are generating a dataset of AI-written Python code for a security
 research project.** Four open-source LLMs each receive the same set of
 coding prompts, and we collect what they write. Later analysis — on a
