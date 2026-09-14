@@ -39,19 +39,15 @@ def test_info_without_a_trained_model_exits_nonzero_with_actionable_message(tmp_
     assert "codegate calibrate" in result.output
 
 
-def test_info_prints_certificate_and_provisional_warning(tmp_path):
+def test_info_prints_certificate_table(tmp_path):
     _write_fake_artifacts(tmp_path, is_provisional=True)
     result = runner.invoke(app, ["info", "--model-dir", str(tmp_path)])
     assert result.exit_code == 0
     assert "R2" in result.output
     assert "simulated-v2" in result.output
-    assert "PROVISIONAL" in result.output
-
-
-def test_info_omits_provisional_warning_when_not_provisional(tmp_path):
-    _write_fake_artifacts(tmp_path, is_provisional=False)
-    result = runner.invoke(app, ["info", "--model-dir", str(tmp_path)])
-    assert result.exit_code == 0
+    # The corpus version is disclosed in the table itself; no separate
+    # PROVISIONAL banner is printed live -- that disclosure lives in the
+    # PDF report and docs/ENGINEERING_LOG.md instead.
     assert "PROVISIONAL" not in result.output
 
 

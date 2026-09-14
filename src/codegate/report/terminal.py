@@ -55,11 +55,6 @@ def render_terminal(result: ScanResult, target: Path, console: Console, verifier
         )
         cert.add_row("Certified max miss-rate (alpha)", f"{calib.alpha:.2%}")
         console.print(cert)
-        if calib.is_provisional:
-            console.print(
-                "[bold yellow]PROVISIONAL[/bold yellow] certificate -- "
-                "calibrated on a simulated corpus. See docs/ENGINEERING_LOG.md."
-            )
 
     console.print(
         f"LLM calls made: {cost.calls_made}  |  avoided: {cost.calls_avoided}  |  "

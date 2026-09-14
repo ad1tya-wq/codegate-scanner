@@ -176,7 +176,7 @@ still-open phase.
 
 ## Current status
 
-Everything through Phase 7 and 9 is built, tested (201 automated tests,
+Everything through Phase 7 and 9 is built, tested (200 automated tests,
 CI-green on Python 3.11 and 3.13), and verified against real code —
 both the repo's own source and independently-written public
 repositories. Phase 8 (retrain on real data) was attempted this week

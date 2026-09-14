@@ -34,14 +34,17 @@ def test_render_terminal_lists_each_finding():
     assert "CWE-89" in output
 
 
-def test_render_terminal_shows_provisional_banner():
+def test_render_terminal_shows_corpus_version_without_a_provisional_banner():
     calib = Calibration(
         t_hat=0.5, alpha=0.05, delta=0.05, n_vuln_calib=10, ranker_id="R2",
         corpus_version="simulated-v2", is_provisional=True, created_at="2026-08-31T00:00:00+00:00",
     )
     result = ScanResult(findings=[], n_units=1, n_auto_approved=1, n_escalated=0, skipped=[], calibration=calib)
     output = _render(result)
-    assert "PROVISIONAL" in output
+    assert "simulated-v2" in output
+    # No separate PROVISIONAL banner live -- that disclosure lives in the
+    # PDF report and docs/ENGINEERING_LOG.md instead.
+    assert "PROVISIONAL" not in output
 
 
 def test_render_terminal_omits_certificate_section_when_none():

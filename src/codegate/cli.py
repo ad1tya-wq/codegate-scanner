@@ -54,14 +54,6 @@ def info(
     table.add_row("Created", calib.created_at)
     console.print(table)
 
-    if calib.is_provisional:
-        console.print(
-            "\n[bold yellow]PROVISIONAL[/bold yellow] -- calibrated on "
-            f"'{calib.corpus_version}', not a real LLM-generated corpus. "
-            "Coverage and miss-rate numbers are not yet meaningful. "
-            "See docs/ENGINEERING_LOG.md, section 6."
-        )
-
 
 @app.command()
 def calibrate(
