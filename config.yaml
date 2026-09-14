@@ -20,11 +20,15 @@ flavors:
 # whole corpus runs with zero API keys and zero cost. These are Ollama model tags
 # and must match what `ollama list` reports on the host — if the host pulled the
 # smaller variants (:1.5b, :1.3b, :3b) to fit in RAM, change these to match.
+# starcoder2:7b was dropped after the real-540 run: it is a base completion
+# model, not instruction-tuned, and produced ZERO vulnerable samples across
+# 163 attempts -- volume without signal. Four distinct model families are
+# still needed for the generator-shift experiment, so it is a swap.
 generators:
   - qwen2.5-coder:7b
   - deepseek-coder:6.7b
   - codellama:7b
-  - starcoder2:7b
+  - codegemma:7b-instruct
 
 adjudicator: gemini-flash   # label adjudicator — not a generator.
                             # Not required for the Ollama corpus run: the dynamic
@@ -32,9 +36,16 @@ adjudicator: gemini-flash   # label adjudicator — not a generator.
                             # oracle for CWE-798, so consensus never needs its vote.
 verifier: llama-3.3-70b-groq # escalation verifier — pre-registered, disclosed overlap w/ generator role
 
-samples_per_prompt: 1       # k — 135 prompts x 4 generators x 1 = 540 samples (~2-5h on CPU)
-prompts_per_cwe: 15         # actual count in data/prompts/ (target for a full run is 60)
-split_ratios: {train: 0.4, calib: 0.3, test: 0.3}
+# k stays at 1 on purpose. LTT's binomial p-value assumes the calibration
+# samples are exchangeable draws; three completions of the SAME prompt from
+# the SAME model are highly correlated, so n=300 of those is worth far less
+# than n=300 independent ones and the certificate would be quietly
+# optimistic. Corpus growth comes from new task groups, not replicates.
+samples_per_prompt: 1       # 540 prompts x 4 generators x 1 = 2,160 samples
+prompts_per_cwe: 60         # actual count in data/prompts/; splits 24/24/12
+                            # per CWE, sized so the calibration split carries
+                            # enough vulnerable samples to certify alpha=0.05
+                            # (see docs/ENGINEERING_LOG.md section 12.2)
 
 paths:
   prompts_dir: data/prompts

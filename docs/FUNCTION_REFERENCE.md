@@ -36,10 +36,13 @@ ONLINE (scanner, runs constantly, consumes artifacts):
 ## config.py
 
 ### `config.load_config(path: str = "config.yaml") -> CodeGateConfig`
-**Does:** Reads `config.yaml`, validates two cross-field invariants (the
-adjudicator model must not also appear in the generators list, and
-`split_ratios` must sum to 1.0), and returns an immutable `CodeGateConfig`
-built from the raw YAML.
+**Does:** Reads `config.yaml`, validates one cross-field invariant (the
+adjudicator model must not also appear in the generators list), and returns
+an immutable `CodeGateConfig` built from the raw YAML. A `split_ratios`
+key was also parsed and validated here until 2026-09-14; it was read by
+nothing, since splits are assigned per task group by the `split:` key in
+each prompt YAML. An old config still carrying the key loads fine — it is
+simply ignored.
 **Talks to:** Called by `cli.py::calibrate` and `cli.py::scan` (to look up
 the verifier model name), and by every entry-point script
 (`scripts/run_real.py::main`, `scripts/run_pipeline_dry_run.py::main`,

@@ -16,7 +16,6 @@ class CodeGateConfig:
     verifier: str
     samples_per_prompt: int
     prompts_per_cwe: int
-    split_ratios: dict[str, float]
     prompts_dir: str
     fixtures_dir: str
     runs_dir: str
@@ -34,10 +33,12 @@ def load_config(path: str = "config.yaml") -> CodeGateConfig:
             f"also appears in generators {raw['generators']}"
         )
 
-    ratios = raw["split_ratios"]
-    total = sum(ratios.values())
-    if abs(total - 1.0) > 1e-6:
-        raise ValueError(f"split_ratios must sum to 1.0, got {total}")
+    # There was a `split_ratios` key here, parsed and validated to sum to
+    # 1.0, and read by nothing. Splits are assigned per task group by the
+    # `split:` key in each prompt YAML, which is what load_prompt_bank
+    # actually reads. Dead config that reads as live is how the hardcoded
+    # alpha/delta defect (decision #3) went unnoticed, so it is gone rather
+    # than left as documentation of an intention.
 
     paths = raw["paths"]
     return CodeGateConfig(
@@ -51,7 +52,6 @@ def load_config(path: str = "config.yaml") -> CodeGateConfig:
         verifier=raw["verifier"],
         samples_per_prompt=raw["samples_per_prompt"],
         prompts_per_cwe=raw["prompts_per_cwe"],
-        split_ratios=dict(ratios),
         prompts_dir=paths["prompts_dir"],
         fixtures_dir=paths["fixtures_dir"],
         runs_dir=paths["runs_dir"],

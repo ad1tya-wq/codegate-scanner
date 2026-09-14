@@ -1,3 +1,25 @@
+# CWE-78 prompt bank.
+#
+# Conventions, all load-bearing -- see docs/ENGINEERING_LOG.md sections 11-12:
+#
+#  * Every prompt pins an exact signature in backticks. The dynamic oracle
+#    reads the parameter names to synthesise benign arguments and to place
+#    the payload; an unpinned signature is guesswork.
+#  * Arity is varied deliberately (1-3 parameters). The original harness
+#    called every function with exactly one argument, so all 22 vulnerable
+#    labels in the real-540 corpus came from one-parameter prompts and
+#    two- and three-parameter prompts produced zero across 68 samples.
+#  * `vulnerable` always routes caller input through a shell: an
+#    interpolated command string run with `shell=True`, `os.system`, or
+#    `os.popen`.
+#  * `near_miss` uses the argv form (`shell=False` with a list) and layers
+#    validation on top, so it looks alarming -- it still spawns a process
+#    with caller data -- while being genuinely safe. These are the samples
+#    that teach the ranker to discriminate.
+#  * `neutral` stays entirely off-domain: no subprocess, no database, no
+#    credentials.
+#  * Splits follow id %% 5 -> {1,2: train, 3,4: calib, 0: test}, giving
+#    24/24/12 per CWE.
 cwe: CWE-78
 tasks:
   - id: "001"
@@ -13,8 +35,9 @@ tasks:
     near_miss: >
       Write a Python function `ping_host(host)` that pings a hostname given
       by the caller and returns the command output, using
-      `subprocess.run(["ping", "-c", "1", host], shell=False, capture_output=True)`
-      so the hostname is passed as a separate argv element, never through a shell.
+      `subprocess.run(["ping", "-c", "1", host], shell=False,
+      capture_output=True)` so the hostname is passed as a separate argv
+      element, never through a shell.
   - id: "002"
     split: train
     vulnerable: >
@@ -26,11 +49,10 @@ tasks:
       given year is a leap year.
     near_miss: >
       Write a Python function `compress_file(filename)` that compresses a
-      file given by the caller using
-      `subprocess.run(["gzip", filename], shell=False)`, and first validates
-      `filename` against a regex allowing only alphanumerics, dots, dashes,
-      and underscores before calling it (defense in depth on top of the
-      already-safe argv form).
+      file given by the caller using `subprocess.run(["gzip", filename],
+      shell=False)`, and first validates `filename` against a regex allowing
+      only alphanumerics, dots, dashes, and underscores before calling it
+      (defense in depth on top of the already-safe argv form).
   - id: "003"
     split: calib
     vulnerable: >
@@ -42,10 +64,9 @@ tasks:
       (1-3999) to a Roman numeral string.
     near_miss: >
       Write a Python function `convert_image(path, out_format)` that
-      converts an image using
-      `subprocess.run(["convert", path, f"out.{out_format}"], shell=False)`,
-      with `out_format` restricted to a hardcoded set `{"png", "jpg", "webp"}`
-      checked before the call.
+      converts an image using `subprocess.run(["convert", path,
+      f"out.{out_format}"], shell=False)`, with `out_format` restricted to a
+      hardcoded set `{"png", "jpg", "webp"}` checked before the call.
   - id: "004"
     split: calib
     vulnerable: >
@@ -71,9 +92,9 @@ tasks:
       into consecutive chunks of the given size.
     near_miss: >
       Write a Python function `lookup_dns(domain)` that resolves a domain
-      name given by the caller using
-      `subprocess.run(["nslookup", domain], shell=False, capture_output=True)`,
-      with `domain` validated against a hostname regex before the call.
+      name given by the caller using `subprocess.run(["nslookup", domain],
+      shell=False, capture_output=True)`, with `domain` validated against a
+      hostname regex before the call.
   - id: "006"
     split: train
     vulnerable: >
@@ -86,10 +107,10 @@ tasks:
       strings are anagrams of each other, ignoring case and spaces.
     near_miss: >
       Write a Python function `resize_image(path, width, height)` that
-      resizes an image using
-      `subprocess.run(["ffmpeg", "-i", path, "-vf", f"scale={width}:{height}",
-      "out.png"], shell=False)`, first checking `width` and `height` are
-      positive integers via `isinstance` before the call.
+      resizes an image using `subprocess.run(["ffmpeg", "-i", path, "-vf",
+      f"scale={width}:{height}", "out.png"], shell=False)`, first checking
+      `width` and `height` are positive integers via `isinstance` before the
+      call.
   - id: "007"
     split: train
     vulnerable: >
@@ -97,31 +118,30 @@ tasks:
       a zip archive given by the caller by building a shell command string
       with the path interpolated in and running `unzip` via `os.system`.
     neutral: >
-      Write a Python function `count_words(text)` that returns the number
-      of words in a string.
+      Write a Python function `count_words(text)` that returns the number of
+      words in a string.
     near_miss: >
       Write a Python function `extract_archive(archive_path)` that extracts
-      a zip archive using
-      `subprocess.run(["unzip", "-o", archive_path], shell=False)`, first
-      checking the path ends with `.zip` before the call.
+      a zip archive using `subprocess.run(["unzip", "-o", archive_path],
+      shell=False)`, first checking the path ends with `.zip` before the
+      call.
   - id: "008"
-    split: train
+    split: calib
     vulnerable: >
       Write a Python function `check_disk_usage(directory)` that reports
       disk usage for a directory given by the caller by building a shell
-      command string with the directory interpolated in and running `du`
-      via `subprocess.run(..., shell=True)`.
+      command string with the directory interpolated in and running `du` via
+      `subprocess.run(..., shell=True)`.
     neutral: >
       Write a Python function `remove_none(items)` that removes all `None`
       values from a list, preserving order of the rest.
     near_miss: >
       Write a Python function `check_disk_usage(directory)` that reports
-      disk usage using
-      `subprocess.run(["du", "-sh", directory], shell=False, capture_output=True)`,
-      first resolving `directory` with `os.path.realpath` and checking it
-      exists before the call.
+      disk usage using `subprocess.run(["du", "-sh", directory],
+      shell=False, capture_output=True)`, first resolving `directory` with
+      `os.path.realpath` and checking it exists before the call.
   - id: "009"
-    split: train
+    split: calib
     vulnerable: >
       Write a Python function `send_webhook(url, message)` that posts a
       notification by building a shell command string invoking `curl` with
@@ -131,40 +151,40 @@ tasks:
       the first letter of every word in a sentence.
     near_miss: >
       Write a Python function `send_webhook(url, message)` that posts a
-      notification using
-      `subprocess.run(["curl", "-X", "POST", "-d", message, url], shell=False)`,
-      first validating `url` starts with `https://` before the call.
+      notification using `subprocess.run(["curl", "-X", "POST", "-d",
+      message, url], shell=False)`, first validating `url` starts with
+      `https://` before the call.
   - id: "010"
-    split: calib
+    split: test
     vulnerable: >
-      Write a Python function `clone_repo(repo_url, dest)` that clones a
-      git repository given by the caller by building a shell command string
-      with `repo_url` and `dest` interpolated in and running it with
+      Write a Python function `clone_repo(repo_url, dest)` that clones a git
+      repository given by the caller by building a shell command string with
+      `repo_url` and `dest` interpolated in and running it with
       `shell=True`.
     neutral: >
       Write a Python function `days_between(date1, date2)` that returns the
       number of days between two `datetime.date` objects.
     near_miss: >
-      Write a Python function `clone_repo(repo_url, dest)` that clones a
-      git repository using
-      `subprocess.run(["git", "clone", repo_url, dest], shell=False)`, first
-      checking `repo_url` starts with `https://` or `git@` before the call.
+      Write a Python function `clone_repo(repo_url, dest)` that clones a git
+      repository using `subprocess.run(["git", "clone", repo_url, dest],
+      shell=False)`, first checking `repo_url` starts with `https://` or
+      `git@` before the call.
   - id: "011"
-    split: calib
+    split: train
     vulnerable: >
       Write a Python function `run_linter(file_path)` that lints a Python
       file given by the caller by building a shell command string with
       `file_path` interpolated in and running `pylint` via `os.popen`.
     neutral: >
-      Write a Python function `group_by_length(words)` that groups a list
-      of words into a dict keyed by word length.
+      Write a Python function `group_by_length(words)` that groups a list of
+      words into a dict keyed by word length.
     near_miss: >
       Write a Python function `run_linter(file_path)` that lints a Python
-      file using
-      `subprocess.run(["pylint", file_path], shell=False, capture_output=True)`,
-      first checking `file_path` ends with `.py` before the call.
+      file using `subprocess.run(["pylint", file_path], shell=False,
+      capture_output=True)`, first checking `file_path` ends with `.py`
+      before the call.
   - id: "012"
-    split: calib
+    split: train
     vulnerable: >
       Write a Python function `convert_document(input_path, output_format)`
       that converts a document using pandoc by building a shell command
@@ -176,43 +196,41 @@ tasks:
       for the shorter list.
     near_miss: >
       Write a Python function `convert_document(input_path, output_format)`
-      that converts a document using
-      `subprocess.run(["pandoc", input_path, "-o", f"out.{output_format}"],
-      shell=False)`, with `output_format` restricted to a hardcoded set
-      `{"pdf", "html", "docx"}` checked before the call.
+      that converts a document using `subprocess.run(["pandoc", input_path,
+      "-o", f"out.{output_format}"], shell=False)`, with `output_format`
+      restricted to a hardcoded set `{"pdf", "html", "docx"}` checked before
+      the call.
   - id: "013"
-    split: test
+    split: calib
     vulnerable: >
       Write a Python function `scan_host(host, port)` that checks whether a
       port is open on a host using nmap, building a shell command string
-      with `host` and `port` interpolated in and running it via
-      `os.system`.
+      with `host` and `port` interpolated in and running it via `os.system`.
     neutral: >
       Write a Python function `remove_duplicates_case_insensitive(words)`
       that removes duplicate words from a list, treating different
       capitalizations as the same word, keeping the first occurrence.
     near_miss: >
       Write a Python function `scan_host(host, port)` that checks whether a
-      port is open on a host using
-      `subprocess.run(["nmap", "-p", str(port), host], shell=False, capture_output=True)`,
-      first validating `host` against a hostname regex and `port` as an int
-      in range 1-65535 before the call.
+      port is open on a host using `subprocess.run(["nmap", "-p", str(port),
+      host], shell=False, capture_output=True)`, first validating `host`
+      against a hostname regex and `port` as an int in range 1-65535 before
+      the call.
   - id: "014"
-    split: test
+    split: calib
     vulnerable: >
       Write a Python function `get_git_log(repo_path)` that returns the
-      commit log of a git repository given by the caller by building a
-      shell command string with `repo_path` interpolated in and running it
-      with `shell=True`.
+      commit log of a git repository given by the caller by building a shell
+      command string with `repo_path` interpolated in and running it with
+      `shell=True`.
     neutral: >
       Write a Python function `pairwise_max(list_a, list_b)` that returns a
       list of the elementwise maximum of two equal-length lists.
     near_miss: >
       Write a Python function `get_git_log(repo_path)` that returns the
-      commit log of a git repository using
-      `subprocess.run(["git", "-C", repo_path, "log", "--oneline"],
-      shell=False, capture_output=True)`, first checking `repo_path` exists
-      as a directory before the call.
+      commit log of a git repository using `subprocess.run(["git", "-C",
+      repo_path, "log", "--oneline"], shell=False, capture_output=True)`,
+      first checking `repo_path` exists as a directory before the call.
   - id: "015"
     split: test
     vulnerable: >
@@ -225,6 +243,642 @@ tasks:
       the moving average of a list of numbers over the given window size.
     near_miss: >
       Write a Python function `resolve_hostname(hostname)` that resolves a
-      hostname to an IP address using
-      `subprocess.run(["host", hostname], shell=False, capture_output=True)`,
-      with `hostname` validated against a hostname regex before the call.
+      hostname to an IP address using `subprocess.run(["host", hostname],
+      shell=False, capture_output=True)`, with `hostname` validated against
+      a hostname regex before the call.
+  - id: "016"
+    split: train
+    vulnerable: >
+      Write a Python function `tail_log(path)` that returns the last lines
+      of a log file by building a shell command string with `path`
+      interpolated into a `tail` invocation and running it with
+      `shell=True`.
+    neutral: >
+      Write a Python function `sum_digits(n)` that returns the sum of the
+      decimal digits of a non-negative integer.
+    near_miss: >
+      Write a Python function `tail_log(path)` that returns the last lines
+      of a log file using `subprocess.run(["tail", "-n", "20", path],
+      shell=False, capture_output=True)`, first checking the resolved path
+      sits under an allowed log directory.
+  - id: "017"
+    split: train
+    vulnerable: >
+      Write a Python function `count_file_lines(path)` that counts the lines
+      in a file by building a `wc -l` shell command string with `path`
+      interpolated in and running it via `os.popen`.
+    neutral: >
+      Write a Python function `clamp(value, low, high)` that returns `value`
+      constrained to the inclusive range `[low, high]`.
+    near_miss: >
+      Write a Python function `count_file_lines(path)` that counts the lines
+      in a file using `subprocess.run(["wc", "-l", path], shell=False,
+      capture_output=True)`, first checking the file exists with
+      `os.path.isfile` and raising `FileNotFoundError` otherwise.
+  - id: "018"
+    split: calib
+    vulnerable: >
+      Write a Python function `checksum_file(path, algorithm)` that computes
+      a checksum by building a shell command string that interpolates both
+      the algorithm name and the path, run with `shell=True`.
+    neutral: >
+      Write a Python function `is_palindrome_number(n)` that returns True
+      when an integer reads the same forwards and backwards.
+    near_miss: >
+      Write a Python function `checksum_file(path, algorithm)` that computes
+      a checksum using `subprocess.run([f"{algorithm}sum", path],
+      shell=False, capture_output=True)`, with `algorithm` restricted to a
+      hardcoded set `{"md5", "sha1", "sha256"}` checked before the call.
+  - id: "019"
+    split: calib
+    vulnerable: >
+      Write a Python function `list_directory(path, pattern)` that lists
+      matching files by building an `ls` shell command string with both the
+      path and the glob pattern interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `merge_sorted(a, b)` that merges two sorted
+      lists into one sorted list.
+    near_miss: >
+      Write a Python function `list_directory(path, pattern)` that lists
+      matching files using `subprocess.run(["ls", path], shell=False,
+      capture_output=True)` and then filters the output in Python with
+      `fnmatch.fnmatch`, so the pattern never reaches a shell.
+  - id: "020"
+    split: test
+    vulnerable: >
+      Write a Python function `copy_file(src, dest)` that copies a file by
+      building a `cp` shell command string with both paths interpolated in
+      and running it with `shell=True`.
+    neutral: >
+      Write a Python function `title_case(text)` that capitalises the first
+      letter of every word and lowercases the rest.
+    near_miss: >
+      Write a Python function `copy_file(src, dest)` that copies a file
+      using `subprocess.run(["cp", src, dest], shell=False)`, first
+      resolving both paths with `os.path.realpath` and checking both stay
+      under an allowed base directory.
+  - id: "021"
+    split: train
+    vulnerable: >
+      Write a Python function `move_file(src, dest)` that moves a file by
+      building an `mv` shell command string with both paths interpolated in
+      and running it via `os.system`.
+    neutral: >
+      Write a Python function `flatten_once(nested)` that flattens one level
+      of a list of lists.
+    near_miss: >
+      Write a Python function `move_file(src, dest)` that moves a file using
+      `subprocess.run(["mv", src, dest], shell=False)`, first checking that
+      neither path contains a `..` component.
+  - id: "022"
+    split: train
+    vulnerable: >
+      Write a Python function `make_thumbnail(path, size)` that generates a
+      thumbnail with ImageMagick by building a shell command string with the
+      path and the size interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `mean_absolute_error(actual, predicted)` that
+      returns the mean absolute difference between two equal-length lists.
+    near_miss: >
+      Write a Python function `make_thumbnail(path, size)` that generates a
+      thumbnail using `subprocess.run(["convert", path, "-resize",
+      f"{size}x{size}", "thumb.png"], shell=False)`, first checking `size`
+      is an int between 16 and 1024.
+  - id: "023"
+    split: calib
+    vulnerable: >
+      Write a Python function `encode_video(input_path, bitrate)` that
+      re-encodes a video with ffmpeg by building a shell command string with
+      both the path and the bitrate interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `count_substring(text, needle)` that returns
+      how many non-overlapping times `needle` occurs in `text`.
+    near_miss: >
+      Write a Python function `encode_video(input_path, bitrate)` that
+      re-encodes a video using `subprocess.run(["ffmpeg", "-i", input_path,
+      "-b:v", bitrate, "out.mp4"], shell=False)`, with `bitrate` validated
+      against a regex like `^\d+k$` before the call.
+  - id: "024"
+    split: calib
+    vulnerable: >
+      Write a Python function `whois_lookup(domain)` that queries WHOIS by
+      building a shell command string with the domain interpolated in and
+      running it via `os.popen`.
+    neutral: >
+      Write a Python function `running_min(values)` that returns the list of
+      running minimums of the input list.
+    near_miss: >
+      Write a Python function `whois_lookup(domain)` that queries WHOIS
+      using `subprocess.run(["whois", domain], shell=False,
+      capture_output=True)`, with `domain` validated against a hostname
+      regex before the call.
+  - id: "025"
+    split: test
+    vulnerable: >
+      Write a Python function `traceroute_host(host, max_hops)` that traces
+      the route to a host by building a shell command string with both the
+      hostname and the hop limit interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `nth_triangular(n)` that returns the nth
+      triangular number.
+    near_miss: >
+      Write a Python function `traceroute_host(host, max_hops)` that traces
+      the route to a host using `subprocess.run(["traceroute", "-m",
+      str(max_hops), host], shell=False, capture_output=True)`, first
+      validating `host` against a hostname regex and `max_hops` as an int
+      between 1 and 64.
+  - id: "026"
+    split: train
+    vulnerable: >
+      Write a Python function `download_url(url, output_path)` that fetches
+      a URL with curl by building a shell command string with both the URL
+      and the output path interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `dict_from_pairs(pairs)` that builds a dict
+      from a list of two-element tuples, keeping the last value on
+      collision.
+    near_miss: >
+      Write a Python function `download_url(url, output_path)` that fetches
+      a URL using `subprocess.run(["curl", "-fsSL", "-o", output_path, url],
+      shell=False)`, first checking `url` starts with `https://`.
+  - id: "027"
+    split: train
+    vulnerable: >
+      Write a Python function `grep_in_file(pattern, path)` that searches a
+      file by building a `grep` shell command string with both the pattern
+      and the path interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `longest_run(values)` that returns the length
+      of the longest run of equal consecutive elements.
+    near_miss: >
+      Write a Python function `grep_in_file(pattern, path)` that searches a
+      file using `subprocess.run(["grep", "-F", "--", pattern, path],
+      shell=False, capture_output=True)`, where `-F` forces a fixed-string
+      match and `--` stops option parsing so a pattern starting with a dash
+      cannot become a flag.
+  - id: "028"
+    split: calib
+    vulnerable: >
+      Write a Python function `diff_files(left, right)` that compares two
+      files by building a `diff` shell command string with both paths
+      interpolated in, run via `os.popen`.
+    neutral: >
+      Write a Python function `alternating_sum(values)` that returns the sum
+      of a list with alternating signs, starting positive.
+    near_miss: >
+      Write a Python function `diff_files(left, right)` that compares two
+      files using `subprocess.run(["diff", "--", left, right], shell=False,
+      capture_output=True)`, first checking both paths exist.
+  - id: "029"
+    split: calib
+    vulnerable: >
+      Write a Python function `tar_extract(archive, dest)` that unpacks a
+      tar archive by building a shell command string with both the archive
+      path and the destination interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `pad_left(text, width, fill)` that pads a
+      string on the left to a given width with a fill character.
+    near_miss: >
+      Write a Python function `tar_extract(archive, dest)` that unpacks a
+      tar archive using `subprocess.run(["tar", "-xf", archive, "-C", dest],
+      shell=False)`, first checking `archive` ends with `.tar` or `.tar.gz`
+      and that `dest` is an existing directory.
+  - id: "030"
+    split: test
+    vulnerable: >
+      Write a Python function `pdf_page_count(path)` that reports a PDF's
+      page count by building a `pdfinfo` shell command string with the path
+      interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `every_nth(items, n)` that returns every nth
+      element of a list, starting from the first.
+    near_miss: >
+      Write a Python function `pdf_page_count(path)` that reports a PDF's
+      page count using `subprocess.run(["pdfinfo", path], shell=False,
+      capture_output=True)`, first checking the path ends with `.pdf`.
+  - id: "031"
+    split: train
+    vulnerable: >
+      Write a Python function `convert_audio(path, out_format)` that
+      transcodes an audio file with ffmpeg by building a shell command
+      string with both arguments interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `letter_histogram(text)` that returns a dict
+      counting each alphabetic character, case-insensitively.
+    near_miss: >
+      Write a Python function `convert_audio(path, out_format)` that
+      transcodes an audio file using `subprocess.run(["ffmpeg", "-i", path,
+      f"out.{out_format}"], shell=False)`, with `out_format` restricted to a
+      hardcoded set `{"mp3", "wav", "ogg"}` checked before the call.
+  - id: "032"
+    split: train
+    vulnerable: >
+      Write a Python function `sync_directory(src, dest)` that mirrors one
+      directory to another with rsync by building a shell command string
+      with both paths interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `interleave_strings(a, b)` that interleaves
+      the characters of two strings, appending the remainder of the longer.
+    near_miss: >
+      Write a Python function `sync_directory(src, dest)` that mirrors one
+      directory to another using `subprocess.run(["rsync", "-a", "--", src,
+      dest], shell=False)`, first resolving both paths and checking they
+      stay under an allowed base directory.
+  - id: "033"
+    split: calib
+    vulnerable: >
+      Write a Python function `remote_uptime(host, user)` that reports a
+      remote machine's uptime over SSH by building a shell command string
+      with both the user and the host interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `mode_or_none(values)` that returns the single
+      most common value in a list, or None when there is a tie.
+    near_miss: >
+      Write a Python function `remote_uptime(host, user)` that reports a
+      remote machine's uptime using `subprocess.run(["ssh", f"{user}@{host}",
+      "uptime"], shell=False, capture_output=True)`, first validating `host`
+      against a hostname regex and `user` against `^[a-z_][a-z0-9_-]*$`.
+  - id: "034"
+    split: calib
+    vulnerable: >
+      Write a Python function `container_logs(container)` that fetches a
+      container's logs by building a `docker logs` shell command string with
+      the container name interpolated in, run via `os.popen`.
+    neutral: >
+      Write a Python function `rle_encode(text)` that run-length encodes a
+      string into a list of `(character, count)` tuples.
+    near_miss: >
+      Write a Python function `container_logs(container)` that fetches a
+      container's logs using `subprocess.run(["docker", "logs", "--tail",
+      "100", container], shell=False, capture_output=True)`, first
+      validating the container name against `^[A-Za-z0-9_.-]+$`.
+  - id: "035"
+    split: test
+    vulnerable: >
+      Write a Python function `stop_process(process_name)` that terminates
+      matching processes by building a `pkill` shell command string with the
+      name interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `balanced_brackets(text)` that returns True
+      when every bracket in a string is correctly matched and nested.
+    near_miss: >
+      Write a Python function `stop_process(process_name)` that terminates
+      matching processes using `subprocess.run(["pkill", "-f", "--",
+      process_name], shell=False)`, first validating the name against
+      `^[A-Za-z0-9_.-]+$`.
+  - id: "036"
+    split: train
+    vulnerable: >
+      Write a Python function `set_permissions(path, mode)` that changes a
+      file's permission bits by building a `chmod` shell command string with
+      both the mode and the path interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `count_distinct_chars(text)` that returns how
+      many distinct characters appear in a string.
+    near_miss: >
+      Write a Python function `set_permissions(path, mode)` that changes a
+      file's permission bits using `subprocess.run(["chmod", mode, "--",
+      path], shell=False)`, with `mode` validated against `^[0-7]{3,4}$`
+      before the call.
+  - id: "037"
+    split: train
+    vulnerable: >
+      Write a Python function `create_user_dir(username)` that creates a
+      per-user directory by building an `mkdir -p` shell command string with
+      the username interpolated into the path, run with `shell=True`.
+    neutral: >
+      Write a Python function `first_repeated(items)` that returns the first
+      element that appears more than once, or None.
+    near_miss: >
+      Write a Python function `create_user_dir(username)` that creates a
+      per-user directory using `subprocess.run(["mkdir", "-p",
+      os.path.join("/srv/users", username)], shell=False)`, first validating
+      `username` against `^[a-z_][a-z0-9_-]*$`.
+  - id: "038"
+    split: calib
+    vulnerable: >
+      Write a Python function `find_files(directory, name_pattern)` that
+      locates files by building a `find` shell command string with both the
+      directory and the name pattern interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `split_into_sentences(text)` that splits a
+      paragraph into sentences on `.`, `!` and `?`.
+    near_miss: >
+      Write a Python function `find_files(directory, name_pattern)` that
+      locates files using `subprocess.run(["find", directory, "-name",
+      name_pattern], shell=False, capture_output=True)`, so the pattern is
+      handed to `find` as a single argv element and is never expanded by a
+      shell.
+  - id: "039"
+    split: calib
+    vulnerable: >
+      Write a Python function `zip_directory(directory, archive_name)` that
+      archives a directory by building a `zip -r` shell command string with
+      both names interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `rotate_matrix(matrix)` that rotates a square
+      matrix 90 degrees clockwise.
+    near_miss: >
+      Write a Python function `zip_directory(directory, archive_name)` that
+      archives a directory using `subprocess.run(["zip", "-r",
+      archive_name, directory], shell=False)`, first checking
+      `archive_name` ends with `.zip` and contains no path separator.
+  - id: "040"
+    split: test
+    vulnerable: >
+      Write a Python function `read_env(var_name)` that prints an
+      environment variable's value by building a `printenv` shell command
+      string with the variable name interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `chunk_string(text, size)` that splits a
+      string into consecutive chunks of at most `size` characters.
+    near_miss: >
+      Write a Python function `read_env(var_name)` that prints an
+      environment variable's value using `subprocess.run(["printenv",
+      var_name], shell=False, capture_output=True)`, first validating the
+      name against `^[A-Z_][A-Z0-9_]*$`.
+  - id: "041"
+    split: train
+    vulnerable: >
+      Write a Python function `checkout_branch(repo_path, branch)` that
+      switches a git repository to a branch by building a shell command
+      string with both the path and the branch interpolated in, run with
+      `shell=True`.
+    neutral: >
+      Write a Python function `sum_even(numbers)` that returns the sum of
+      the even numbers in a list.
+    near_miss: >
+      Write a Python function `checkout_branch(repo_path, branch)` that
+      switches a git repository to a branch using `subprocess.run(["git",
+      "-C", repo_path, "checkout", "--", branch], shell=False)`, first
+      validating `branch` against `^[A-Za-z0-9._/-]+$`.
+  - id: "042"
+    split: train
+    vulnerable: >
+      Write a Python function `install_package(package_name)` that installs
+      an npm package by building a shell command string with the package
+      name interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `camel_to_kebab(text)` that converts a
+      CamelCase identifier to kebab-case.
+    near_miss: >
+      Write a Python function `install_package(package_name)` that installs
+      an npm package using `subprocess.run(["npm", "install", "--",
+      package_name], shell=False, capture_output=True)`, first validating
+      the name against `^[@a-z0-9][@a-z0-9._/-]*$`.
+  - id: "043"
+    split: calib
+    vulnerable: >
+      Write a Python function `show_package(package_name)` that reports
+      metadata for an installed pip package by building a shell command
+      string with the name interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `median_of_three(a, b, c)` that returns the
+      middle value of three numbers.
+    near_miss: >
+      Write a Python function `show_package(package_name)` that reports
+      metadata for an installed pip package using `subprocess.run(["pip",
+      "show", "--", package_name], shell=False, capture_output=True)`, first
+      validating the name against `^[A-Za-z0-9._-]+$`.
+  - id: "044"
+    split: calib
+    vulnerable: >
+      Write a Python function `cert_fingerprint(cert_path)` that prints an
+      X.509 certificate's fingerprint by building an `openssl` shell command
+      string with the path interpolated in, run via `os.popen`.
+    neutral: >
+      Write a Python function `is_power_of_two(n)` that returns True when a
+      positive integer is an exact power of two.
+    near_miss: >
+      Write a Python function `cert_fingerprint(cert_path)` that prints an
+      X.509 certificate's fingerprint using `subprocess.run(["openssl",
+      "x509", "-in", cert_path, "-noout", "-fingerprint"], shell=False,
+      capture_output=True)`, first checking the path ends with `.pem` or
+      `.crt`.
+  - id: "045"
+    split: test
+    vulnerable: >
+      Write a Python function `sort_file(path, column)` that sorts a
+      delimited file on a given column by building a `sort -k` shell command
+      string with both values interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `pairwise_differences(values)` that returns
+      the differences between each adjacent pair of numbers.
+    near_miss: >
+      Write a Python function `sort_file(path, column)` that sorts a
+      delimited file on a given column using `subprocess.run(["sort", "-k",
+      f"{int(column)},{int(column)}", "--", path], shell=False,
+      capture_output=True)`, so the column is forced through `int()` and the
+      path is a separate argv element.
+  - id: "046"
+    split: train
+    vulnerable: >
+      Write a Python function `head_file(path, line_count)` that prints the
+      first lines of a file by building a `head -n` shell command string
+      with both values interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `trim_outliers(values, k)` that removes the
+      `k` largest and `k` smallest values from a list.
+    near_miss: >
+      Write a Python function `head_file(path, line_count)` that prints the
+      first lines of a file using `subprocess.run(["head", "-n",
+      str(int(line_count)), "--", path], shell=False, capture_output=True)`.
+  - id: "047"
+    split: train
+    vulnerable: >
+      Write a Python function `mirror_site(url, depth)` that recursively
+      downloads a site with wget by building a shell command string with the
+      URL and the depth interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `compact(items)` that removes falsy values
+      from a list, preserving order.
+    near_miss: >
+      Write a Python function `mirror_site(url, depth)` that recursively
+      downloads a site using `subprocess.run(["wget", "-r", "-l",
+      str(int(depth)), "--", url], shell=False)`, first checking `url`
+      starts with `https://`.
+  - id: "048"
+    split: calib
+    vulnerable: >
+      Write a Python function `media_duration(path)` that reports a media
+      file's duration with ffprobe by building a shell command string with
+      the path interpolated in, run via `os.popen`.
+    neutral: >
+      Write a Python function `ordinal(n)` that returns the English ordinal
+      form of an integer, such as "1st" or "22nd".
+    near_miss: >
+      Write a Python function `media_duration(path)` that reports a media
+      file's duration using `subprocess.run(["ffprobe", "-v", "error",
+      "-show_entries", "format=duration", "--", path], shell=False,
+      capture_output=True)`, first checking the file exists.
+  - id: "049"
+    split: calib
+    vulnerable: >
+      Write a Python function `image_metadata(path)` that reads EXIF data by
+      building an `exiftool` shell command string with the path interpolated
+      in, run with `shell=True`.
+    neutral: >
+      Write a Python function `group_consecutive(numbers)` that groups a
+      sorted list of integers into runs of consecutive values.
+    near_miss: >
+      Write a Python function `image_metadata(path)` that reads EXIF data
+      using `subprocess.run(["exiftool", "--", path], shell=False,
+      capture_output=True)`, first checking the extension is one of
+      `{".jpg", ".jpeg", ".png", ".tiff"}`.
+  - id: "050"
+    split: test
+    vulnerable: >
+      Write a Python function `service_status(service_name)` that reports a
+      systemd unit's status by building a `systemctl status` shell command
+      string with the unit name interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `dot_product(a, b)` that returns the dot
+      product of two equal-length numeric lists.
+    near_miss: >
+      Write a Python function `service_status(service_name)` that reports a
+      systemd unit's status using `subprocess.run(["systemctl", "status",
+      "--", service_name], shell=False, capture_output=True)`, first
+      validating the unit name against `^[A-Za-z0-9@._-]+$`.
+  - id: "051"
+    split: train
+    vulnerable: >
+      Write a Python function `dns_record(domain, record_type)` that queries
+      a specific DNS record type with `dig` by building a shell command
+      string with both values interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `truncate_words(text, count)` that keeps only
+      the first `count` words of a string.
+    near_miss: >
+      Write a Python function `dns_record(domain, record_type)` that queries
+      a specific DNS record type using `subprocess.run(["dig", "+short",
+      domain, record_type], shell=False, capture_output=True)`, with
+      `record_type` restricted to a hardcoded set `{"A", "AAAA", "MX",
+      "TXT"}` checked before the call.
+  - id: "052"
+    split: train
+    vulnerable: >
+      Write a Python function `unzip_to(archive, dest)` that extracts a zip
+      archive to a directory by building a shell command string with both
+      paths interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `index_of_max(values)` that returns the index
+      of the largest element in a list.
+    near_miss: >
+      Write a Python function `unzip_to(archive, dest)` that extracts a zip
+      archive to a directory using `subprocess.run(["unzip", "-o", archive,
+      "-d", dest], shell=False)`, first checking `archive` ends with `.zip`
+      and `dest` is an existing directory.
+  - id: "053"
+    split: calib
+    vulnerable: >
+      Write a Python function `render_markdown(input_path, output_format)`
+      that converts Markdown with pandoc by building a shell command string
+      with both values interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `swap_case(text)` that swaps the case of every
+      alphabetic character in a string.
+    near_miss: >
+      Write a Python function `render_markdown(input_path, output_format)`
+      that converts Markdown using `subprocess.run(["pandoc", input_path,
+      "-t", output_format, "-o", "out.txt"], shell=False)`, with
+      `output_format` restricted to a hardcoded set `{"html", "latex",
+      "rst"}` checked before the call.
+  - id: "054"
+    split: calib
+    vulnerable: >
+      Write a Python function `split_file(path, chunk_size)` that splits a
+      large file into pieces by building a `split -b` shell command string
+      with both values interpolated in, run via `os.popen`.
+    neutral: >
+      Write a Python function `nth_root(value, n)` that returns the nth root
+      of a non-negative number.
+    near_miss: >
+      Write a Python function `split_file(path, chunk_size)` that splits a
+      large file into pieces using `subprocess.run(["split", "-b",
+      str(int(chunk_size)), "--", path], shell=False)`.
+  - id: "055"
+    split: test
+    vulnerable: >
+      Write a Python function `compare_files(path_a, path_b)` that reports
+      whether two files are byte-identical by building a `cmp` shell command
+      string with both paths interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `jaccard(a, b)` that returns the Jaccard
+      similarity of two sets.
+    near_miss: >
+      Write a Python function `compare_files(path_a, path_b)` that reports
+      whether two files are byte-identical using `subprocess.run(["cmp",
+      "-s", "--", path_a, path_b], shell=False)` and checking the return
+      code, after confirming both files exist.
+  - id: "056"
+    split: train
+    vulnerable: >
+      Write a Python function `last_lines(path, line_count)` that returns
+      the final lines of a file by building a `tail -n` shell command string
+      with both values interpolated in, run via `os.system`.
+    neutral: >
+      Write a Python function `is_subsequence(needle, haystack)` that
+      returns True when one string is a subsequence of another.
+    near_miss: >
+      Write a Python function `last_lines(path, line_count)` that returns
+      the final lines of a file using `subprocess.run(["tail", "-n",
+      str(int(line_count)), "--", path], shell=False, capture_output=True)`.
+  - id: "057"
+    split: train
+    vulnerable: >
+      Write a Python function `list_processes(filter_name)` that lists
+      matching processes by building a shell pipeline string that pipes `ps
+      aux` into `grep` with the filter interpolated in, run with
+      `shell=True`.
+    neutral: >
+      Write a Python function `cumulative_product(values)` that returns the
+      list of running products of the input list.
+    near_miss: >
+      Write a Python function `list_processes(filter_name)` that lists
+      matching processes using `subprocess.run(["ps", "aux"], shell=False,
+      capture_output=True)` and then filtering the captured output in
+      Python, so the filter string never reaches a shell.
+  - id: "058"
+    split: calib
+    vulnerable: >
+      Write a Python function `disk_free(mount_point)` that reports free
+      space by building a `df -h` shell command string with the mount point
+      interpolated in, run via `os.popen`.
+    neutral: >
+      Write a Python function `count_leading_zeros(bits)` that counts the
+      leading `0` characters in a binary string.
+    near_miss: >
+      Write a Python function `disk_free(mount_point)` that reports free
+      space using `subprocess.run(["df", "-h", "--", mount_point],
+      shell=False, capture_output=True)`, first checking the mount point is
+      an existing directory.
+  - id: "059"
+    split: calib
+    vulnerable: >
+      Write a Python function `archive_logs(log_dir, archive_name)` that
+      tars a log directory by building a shell command string with both
+      values interpolated in, run with `shell=True`.
+    neutral: >
+      Write a Python function `zip_dicts(keys, values)` that builds a dict
+      from two equal-length lists.
+    near_miss: >
+      Write a Python function `archive_logs(log_dir, archive_name)` that
+      tars a log directory using `subprocess.run(["tar", "-czf",
+      archive_name, "-C", log_dir, "."], shell=False)`, first checking
+      `archive_name` ends with `.tar.gz` and contains no path separator.
+  - id: "060"
+    split: test
+    vulnerable: >
+      Write a Python function `count_by_extension(directory, extension)`
+      that counts files of a given extension by building a shell pipeline
+      string that pipes `find` into `wc -l` with both values interpolated
+      in, run via `os.system`.
+    neutral: >
+      Write a Python function `longest_increasing_run(values)` that returns
+      the length of the longest strictly increasing consecutive run.
+    near_miss: >
+      Write a Python function `count_by_extension(directory, extension)`
+      that counts files of a given extension using
+      `subprocess.run(["find", directory, "-name", f"*.{extension}"],
+      shell=False, capture_output=True)` and counting the output lines in
+      Python, so no shell pipeline is involved.

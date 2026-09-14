@@ -27,8 +27,28 @@ def test_role_reuse_guard_raises_when_violated(tmp_path):
         "cwes: [CWE-89]\nflavors: [vulnerable]\n"
         "generators: [model-a]\nadjudicator: model-a\nverifier: model-b\n"
         "samples_per_prompt: 1\nprompts_per_cwe: 1\n"
-        "split_ratios: {train: 0.4, calib: 0.3, test: 0.3}\n"
         "paths: {prompts_dir: x, fixtures_dir: y, runs_dir: z}\n"
     )
     with pytest.raises(ValueError, match="role"):
         load_config(str(bad))
+
+
+def test_load_config_ignores_a_leftover_split_ratios_key(tmp_path):
+    """
+    `split_ratios` was parsed and validated but read by nothing -- splits
+    come from each task group's `split:` key in the prompt YAML. The field
+    is gone; an old config file carrying it must still load rather than
+    crash, since the key is inert either way.
+    """
+    cfg_path = tmp_path / "legacy_config.yaml"
+    cfg_path.write_text(
+        "alpha: 0.05\ndelta: 0.05\nrandom_seed: 1\n"
+        "cwes: [CWE-89]\nflavors: [vulnerable]\n"
+        "generators: [model-a]\nadjudicator: model-b\nverifier: model-c\n"
+        "samples_per_prompt: 1\nprompts_per_cwe: 1\n"
+        "split_ratios: {train: 0.4, calib: 0.3, test: 0.3}\n"
+        "paths: {prompts_dir: x, fixtures_dir: y, runs_dir: z}\n"
+    )
+    cfg = load_config(str(cfg_path))
+    assert cfg.prompts_per_cwe == 1
+    assert not hasattr(cfg, "split_ratios")

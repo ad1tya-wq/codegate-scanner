@@ -1445,3 +1445,74 @@ in 12.5) would put it near 170.
 **Status:** SQLi oracle `SOLID`. 125 oracle tests, including 21 for the
 shim alone covering both paramstyles, cursor context managers, invalid SQL,
 and the never-stub guard.
+
+### 12.7 · Prompt bank expanded to 60 task groups per CWE (2026-09-14)
+
+Cause 2 from 12.5 is fixed, and the bank is now sized for the certificate
+rather than for convenience.
+
+**Size and allocation.** 15 -> 60 task groups per CWE, split 24 train /
+24 calib / 12 test by the rule `id %% 5 -> {1,2: train, 3,4: calib,
+0: test}`. That is 540 prompts, and at 4 generators x 1 sample,
+**2,160 samples**. The interleaved rule keeps thematically adjacent groups
+from landing in the same split.
+
+Calibration now carries 24 vulnerable-flavor prompts per CWE — 96 samples
+each. At the yields measured in 12.6:
+
+| CWE | calib vulnerable-flavor samples | measured yield | projected |
+|---|---|---|---|
+| CWE-78 | 96 | 68% | 65 |
+| CWE-89 | 96 | 52% | 50 |
+| CWE-798 | 96 | 17% | 16 |
+| | | | **131** |
+
+against a floor of 59 and a working target of 120. If the CWE-798 prompt
+change below lifts that CWE to ~60%, the projection is 172.
+
+**`samples_per_prompt` stays at 1.** The original plan's route to a bigger
+corpus was 3 completions per prompt (540 -> 1,620). That would have been
+the wrong kind of growth: LTT's binomial p-value assumes the calibration
+samples are exchangeable draws, and three completions of the same prompt
+from the same model are highly correlated, so n=300 of those is worth much
+less than n=300 independent ones — the certificate would be quietly
+optimistic rather than merely weak. New task groups are genuine new draws.
+
+**CWE-798's prompts now pin the literal.** This is the fix for the 17%
+yield. Asked simply to "hardcode the password", models write
+`your_password`, `YOUR_API_KEY`, `Bearer <hardcoded_api_key>` — they are
+trained not to emit real-looking secrets. Those are placeholders, the
+oracle correctly clears them, and the bank's own near-miss for task 003
+used a placeholder fallback as a *safe* shape, so relabelling them
+vulnerable would have collided two flavors. Every vulnerable CWE-798 prompt
+now names its secret ("...written as the string literal `hunter2`"), with
+64 distinct literals, each verified against `check_creds` to confirm it is
+actually detectable and contains no placeholder marker.
+`tests/test_corpus.py` enforces the pinning.
+
+**Statement-type and arity coverage.** The old CWE-89 bank was SELECT-heavy
+because the old oracle could only see injections that widened a SELECT.
+With that constraint gone the new groups span INSERT, UPDATE, DELETE,
+ORDER BY, LIKE, BETWEEN, IN, JOIN, GROUP BY/HAVING, aggregates and
+LIMIT/OFFSET. Arity is now deliberate rather than accidental — CWE-89
+vulnerable prompts span 2/3/4 parameters (32/24/4 groups), CWE-78 spans
+1/2/3 — and a test asserts the spread, so a regression in signature
+handling shows up as failed labels instead of silence.
+
+**`starcoder2:7b` dropped from `config.yaml`**, replaced by
+`codegemma:7b-instruct`. It is a base completion model, not
+instruction-tuned, and produced zero vulnerable samples across 163 attempts
+in the real-540 run — volume without signal. Four distinct model families
+are still required for the generator-shift experiment, so this is a swap,
+not a removal.
+
+**`split_ratios` removed from `config.yaml` and `CodeGateConfig`.** It was
+parsed and validated to sum to 1.0 and read by nothing: splits come from
+each task group's `split:` key, which is what `load_prompt_bank` reads.
+Dead config that reads as live is how the hardcoded alpha/delta defect
+(decision #3) went unnoticed. An old config still carrying the key loads
+fine — it is now simply ignored, and a test pins that.
+
+**Status:** prompt bank `SOLID` as a structure; its yield is `PROVISIONAL`
+until the pilot run measures it. The projections above are extrapolations
+from 516 samples, not results.

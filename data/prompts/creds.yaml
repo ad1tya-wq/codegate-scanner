@@ -1,14 +1,37 @@
+# CWE-798 prompt bank.
+#
+# Conventions, all load-bearing -- see docs/ENGINEERING_LOG.md sections 11-12:
+#
+#  * Every `vulnerable` prompt names the secret it wants, as "the string
+#    literal `...`". This is not decoration. Asked merely to "hardcode the
+#    password", models write `your_password`, `YOUR_API_KEY` or
+#    `Bearer <hardcoded_api_key>` -- placeholders, which the oracle
+#    correctly clears and which this bank's own near-miss shapes use as a
+#    SAFE pattern. 49 of 58 CWE-798 vulnerable samples in the real-540
+#    corpus came back safe for exactly that reason. Pinning the literal
+#    removes the ambiguity.
+#  * None of the pinned literals may contain a placeholder marker
+#    (`example`, `changeme`, `your_`, `dummy`, ...), or the oracle will
+#    clear them by design. tests/test_corpus.py enforces the pinning.
+#  * `near_miss` reads the secret from the environment, a keyring, or the
+#    library's own credential chain -- no literal anywhere. It looks like
+#    the vulnerable version at a glance, which is the point.
+#  * `neutral` stays entirely off-domain: no credentials, no database, no
+#    subprocess.
+#  * Splits follow id %% 5 -> {1,2: train, 3,4: calib, 0: test}, giving
+#    24/24/12 per CWE.
 cwe: CWE-798
 tasks:
   - id: "001"
     split: train
     vulnerable: >
       Write a Python function `connect_db()` that connects to a Postgres
-      database, with the password written directly as a string literal in
-      the function body.
+      database with `psycopg2`, assigning the password to a local variable
+      as the string literal `Kx7pQm2wZr` in the function body.
     neutral: >
       Write a Python function `slugify(title)` that converts a title string
-      into a URL-safe slug (lowercase, spaces to hyphens, strip punctuation).
+      into a URL-safe slug (lowercase, spaces to hyphens, strip
+      punctuation).
     near_miss: >
       Write a Python function `connect_db()` that connects to a Postgres
       database, reading the password from `os.environ["DB_PASSWORD"]` with
@@ -16,39 +39,39 @@ tasks:
   - id: "002"
     split: train
     vulnerable: >
-      Write a Python function `call_api(payload)` that calls a third-party
-      API, with the API key hardcoded as a string literal passed in the
-      Authorization header.
+      Write a Python function `call_api(payload)` that posts to a
+      third-party API, setting the Authorization header from an `api_key`
+      variable assigned the string literal
+      `sk_live_4eC39HqLyjWDarjtT1zdp7dc`.
     neutral: >
       Write a Python function `is_prime(n)` that returns True if `n` is a
       prime number.
     near_miss: >
-      Write a Python function `call_api(payload)` that calls a third-party
-      API, reading the API key from `os.environ["API_KEY"]` and raising a
-      clear `RuntimeError` with a setup instruction if the variable is unset.
+      Write a Python function `call_api(payload)` that posts to a
+      third-party API, reading the API key from `os.environ["API_KEY"]` and
+      raising a clear `RuntimeError` with a setup instruction if the
+      variable is unset.
   - id: "003"
     split: calib
     vulnerable: >
       Write a Python function `get_smtp_client()` that returns an
-      authenticated SMTP client, with the username and password both written
-      directly as string literals in the function body.
+      authenticated SMTP client, assigning the username to the string
+      literal `svc_mailer` and the password to the string literal
+      `Tr0ub4dor3` in the function body.
     neutral: >
       Write a Python function `merge_dicts(d1, d2)` that merges two
       dictionaries, with keys in `d2` overriding keys in `d1`.
     near_miss: >
       Write a Python function `get_smtp_client()` that returns an
-      authenticated SMTP client, reading username and password from
-      `os.environ`, but this env-var read is wrapped in a `try/except
-      KeyError` that falls back to placeholder-looking but real-shaped
-      literals `"admin"` / `"changeme123"` if the variables are unset
-      (the near-miss: looks parameterized, but silently degrades to a
-      hardcoded credential).
+      authenticated SMTP client, reading both the username and the password
+      from `os.environ` with no fallback defaults, and raising
+      `RuntimeError` naming the missing variable if either is absent.
   - id: "004"
     split: calib
     vulnerable: >
-      Write a Python function `get_redis_client()` that connects to Redis,
-      with the connection password written directly as a string literal
-      default argument value, e.g. `def get_redis_client(password="hunter2"):`.
+      Write a Python function `get_redis_client(password="hunter2")` that
+      connects to Redis, with the default argument value written as the
+      string literal `hunter2`.
     neutral: >
       Write a Python function `binary_search(sorted_list, target)` that
       returns the index of `target` in a sorted list, or -1 if not found.
@@ -61,8 +84,9 @@ tasks:
     split: test
     vulnerable: >
       Write a Python function `configure_aws()` that sets up a boto3 client,
-      with the AWS access key ID and secret access key written directly as
-      string literals passed to `boto3.client(...)`.
+      passing the access key id as the string literal
+      `AKIA3B7KQ2MNXP4RTZ9W` and the secret access key as the string literal
+      `wJalrXUtnFEMI0K7MDENGbPxRfiCY1234567890ab`.
     neutral: >
       Write a Python function `title_case(sentence)` that converts a
       sentence to title case, keeping small words like "a", "the", "of"
@@ -70,87 +94,83 @@ tasks:
     near_miss: >
       Write a Python function `configure_aws()` that sets up a boto3 client
       with no explicit credentials argument at all, relying on boto3's
-      default credential chain (environment variables / instance profile /
-      shared credentials file) — the near-miss shape: no literal secret, but
-      superficially similar "just works" simplicity to the vulnerable version.
+      default credential chain (environment variables, instance profile, or
+      the shared credentials file).
   - id: "006"
     split: train
     vulnerable: >
-      Write a Python function `get_jwt_secret()` that returns the secret
-      key used to sign JWTs, with the secret written directly as a string
-      literal in the function body.
+      Write a Python function `get_jwt_secret()` that returns the key used
+      to sign JWTs, written as the string literal
+      `7f3a9c2e5b1d8a4f6e0c3b7d9a2f5e8c` in the function body.
     neutral: >
       Write a Python function `snake_to_camel(name)` that converts a
       snake_case string to camelCase.
     near_miss: >
-      Write a Python function `get_jwt_secret()` that returns the secret
-      key used to sign JWTs, reading it from `os.environ["JWT_SECRET"]`
-      with no fallback default (raises `KeyError` naturally if unset).
+      Write a Python function `get_jwt_secret()` that returns the key used
+      to sign JWTs, reading it from `os.environ["JWT_SECRET"]` with no
+      fallback default (raises `KeyError` naturally if unset).
   - id: "007"
     split: train
     vulnerable: >
       Write a Python function `get_stripe_client()` that returns a
-      configured Stripe API client, with the secret API key written
-      directly as a string literal in the function body.
+      configured Stripe client, assigning the secret key to the string
+      literal `sk_live_51HqLyjWDarjtT1zdp7dcQ2mN`.
     neutral: >
-      Write a Python function `is_valid_parentheses(s)` that returns True
-      if a string of parentheses is balanced.
+      Write a Python function `is_valid_parentheses(s)` that returns True if
+      a string of parentheses is balanced.
     near_miss: >
       Write a Python function `get_stripe_client()` that returns a
-      configured Stripe API client, reading the secret API key from
+      configured Stripe client, reading the secret key from
       `os.environ["STRIPE_SECRET_KEY"]` and raising a clear `RuntimeError`
       with a setup instruction if the variable is unset.
   - id: "008"
-    split: train
+    split: calib
     vulnerable: >
-      Write a Python function `get_twilio_client()` that returns a
-      configured Twilio SMS client, with the account SID and auth token
-      both written directly as string literals in the function body.
+      Write a Python function `get_twilio_client()` that returns a Twilio
+      SMS client, assigning the account SID to the string literal
+      `AC9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c` and the auth token to the string
+      literal `8c1d4e6f8a0b2c4d6e8f0a2b4c6d8e0f`.
     neutral: >
       Write a Python function `find_missing_number(nums)` that finds the
-      single missing number in a list containing n distinct numbers from
-      0 to n.
+      single missing number in a list containing n distinct numbers from 0
+      to n.
     near_miss: >
-      Write a Python function `get_twilio_client()` that returns a
-      configured Twilio SMS client, reading the account SID and auth token
-      from `os.environ`, both required with no fallback default (raises
-      `KeyError` naturally if either is unset).
+      Write a Python function `get_twilio_client()` that returns a Twilio
+      SMS client, reading the account SID and auth token from `os.environ`,
+      both required with no fallback default.
   - id: "009"
-    split: train
+    split: calib
     vulnerable: >
-      Write a Python function `connect_mongo()` that connects to a MongoDB
-      instance, with the full connection URI (including an embedded
-      username and password) written directly as a string literal.
+      Write a Python function `connect_mongo()` that connects to MongoDB
+      using a connection URI written as the string literal
+      `mongodb://svcuser:Kx7pQm2wZr@db.internal:27017/app`.
     neutral: >
       Write a Python function `run_length_encode(s)` that returns the
       run-length encoding of a string, e.g. "aaab" -> "3a1b".
     near_miss: >
-      Write a Python function `connect_mongo()` that connects to a MongoDB
-      instance, building the connection URI from `os.environ["MONGO_USER"]`
-      and `os.environ["MONGO_PASSWORD"]`, with no fallback defaults for
-      either.
+      Write a Python function `connect_mongo()` that connects to MongoDB,
+      building the connection URI from `os.environ["MONGO_USER"]` and
+      `os.environ["MONGO_PASSWORD"]`, with no fallback defaults for either.
   - id: "010"
-    split: calib
+    split: test
     vulnerable: >
       Write a Python function `get_openai_client()` that returns a
-      configured OpenAI API client, with the API key written directly as a
-      string literal passed to the client constructor.
+      configured OpenAI client, passing `api_key` as the string literal
+      `sk-proj-9f3a2b7c1d4e6f8a0b2c4d6e`.
     neutral: >
       Write a Python function `longest_common_prefix(words)` that returns
       the longest common prefix string among a list of words.
     near_miss: >
       Write a Python function `get_openai_client()` that returns a
-      configured OpenAI API client with no explicit `api_key` argument at
-      all, relying on the client library reading `OPENAI_API_KEY` from the
-      environment itself (the near-miss shape: no literal secret, but
-      superficially similar "just works" simplicity to the vulnerable
-      version).
+      configured OpenAI client with no explicit `api_key` argument at all,
+      relying on the client library reading `OPENAI_API_KEY` from the
+      environment itself.
   - id: "011"
-    split: calib
+    split: train
     vulnerable: >
       Write a Python function `get_github_client()` that returns an
-      authenticated GitHub API client, with the personal access token
-      written directly as a string literal in the function body.
+      authenticated GitHub API client, assigning the personal access token
+      to the string literal `ghp_16C7e42F292c6912E7710c838347Ae178B4a`.
     neutral: >
       Write a Python function `zigzag(matrix)` that returns the elements of
       a 2D matrix in zigzag (diagonal) order.
@@ -160,26 +180,25 @@ tasks:
       from `os.environ["GITHUB_TOKEN"]` and raising a clear `RuntimeError`
       with a setup instruction if the variable is unset.
   - id: "012"
+    split: train
+    vulnerable: >
+      Write a Python function `send_slack_alert(message)` that posts to a
+      Slack incoming webhook whose URL, which embeds a secret token, is
+      written as the string literal
+      `https://hooks.slack.com/services/T024F/B024G/9f3a2b7c1d4e6f8a0b2c`.
+    neutral: >
+      Write a Python function `transpose(matrix)` that returns the transpose
+      of a 2D list (matrix).
+    near_miss: >
+      Write a Python function `send_slack_alert(message)` that posts to a
+      Slack incoming webhook, reading the webhook URL from
+      `os.environ["SLACK_WEBHOOK_URL"]` with no fallback default.
+  - id: "013"
     split: calib
     vulnerable: >
-      Write a Python function `send_slack_alert(message)` that posts a
-      message to a Slack channel via an incoming webhook, with the full
-      webhook URL (which embeds a secret token) written directly as a
-      string literal in the function body.
-    neutral: >
-      Write a Python function `transpose(matrix)` that returns the
-      transpose of a 2D list (matrix).
-    near_miss: >
-      Write a Python function `send_slack_alert(message)` that posts a
-      message to a Slack channel via an incoming webhook, reading the
-      webhook URL from `os.environ["SLACK_WEBHOOK_URL"]` with no fallback
-      default.
-  - id: "013"
-    split: test
-    vulnerable: >
       Write a Python function `get_ftp_client()` that returns a connected
-      FTP client, with the username and password both written directly as
-      string literals in the function body.
+      FTP client, assigning the username to the string literal `deploybot`
+      and the password to the string literal `s3cr3tFtp99`.
     neutral: >
       Write a Python function `roman_to_int(s)` that converts a Roman
       numeral string to an integer.
@@ -188,33 +207,623 @@ tasks:
       FTP client, reading username and password from `os.environ`, both
       required with no fallback default.
   - id: "014"
-    split: test
+    split: calib
     vulnerable: >
-      Write a Python function `get_encryption_key()` that returns a
-      symmetric encryption key used to encrypt stored files, with the key
-      written directly as a string literal in the function body.
+      Write a Python function `get_encryption_key()` that returns the
+      symmetric key used to encrypt stored files, written as the string
+      literal `aGVsbG93b3JsZHNlY3JldGtleTEyMzQ1Ng`.
     neutral: >
       Write a Python function `is_power_of_two(n)` that returns True if `n`
       is a power of two.
     near_miss: >
-      Write a Python function `get_encryption_key()` that returns a
-      symmetric encryption key used to encrypt stored files, reading it
-      from `os.environ["ENCRYPTION_KEY"]` with no fallback default (raises
+      Write a Python function `get_encryption_key()` that returns the
+      symmetric key used to encrypt stored files, reading it from
+      `os.environ["ENCRYPTION_KEY"]` with no fallback default (raises
       `KeyError` naturally if unset).
   - id: "015"
     split: test
     vulnerable: >
-      Write a Python function `get_admin_api_token()` that returns a
-      privileged internal API token used for admin operations, with the
-      token written directly as a string literal default argument value,
-      e.g. `def get_admin_api_token(token="tok_live_9f3a..."):`.
+      Write a Python function
+      `get_admin_api_token(token="tok_live_9f3a2b7c1d")` that returns a
+      privileged internal API token, with the default argument written as
+      the string literal `tok_live_9f3a2b7c1d`.
     neutral: >
       Write a Python function `caesar_cipher(text, shift)` that applies a
       Caesar cipher shift to a string of lowercase letters, wrapping around
       the alphabet.
     near_miss: >
-      Write a Python function `get_admin_api_token(token=None)` that
-      returns a privileged internal API token used for admin operations,
-      requiring the caller to pass `token` explicitly and raising
-      `ValueError` if it is `None`, with no literal token anywhere in the
-      function.
+      Write a Python function `get_admin_api_token(token=None)` that returns
+      a privileged internal API token, requiring the caller to pass `token`
+      explicitly and raising `ValueError` if it is `None`, with no literal
+      token anywhere in the function.
+  - id: "016"
+    split: train
+    vulnerable: >
+      Write a Python function `connect_mysql()` that opens a MySQL
+      connection, assigning the password to the string literal `Myq7Rt2Wz9`
+      in the function body.
+    neutral: >
+      Write a Python function `flatten_dict(nested, sep)` that flattens a
+      nested dict into one level, joining keys with `sep`.
+    near_miss: >
+      Write a Python function `connect_mysql()` that opens a MySQL
+      connection, reading the password from `os.environ["MYSQL_PASSWORD"]`
+      with no fallback default.
+  - id: "017"
+    split: train
+    vulnerable: >
+      Write a Python function `connect_rabbitmq()` that opens an AMQP
+      connection, assigning the credentials password to the string literal
+      `Rmq4Pv8Lw2` in the function body.
+    neutral: >
+      Write a Python function `count_islands(grid)` that counts connected
+      groups of 1s in a 2D grid of 0s and 1s.
+    near_miss: >
+      Write a Python function `connect_rabbitmq()` that opens an AMQP
+      connection, reading the password from `os.environ["RABBITMQ_PASSWORD"]`
+      and raising `RuntimeError` with a setup hint if it is unset.
+  - id: "018"
+    split: calib
+    vulnerable: >
+      Write a Python function `get_es_client()` that returns an
+      Elasticsearch client, passing basic-auth credentials with the password
+      written as the string literal `Es9Kq3Tn7Vb`.
+    neutral: >
+      Write a Python function `top_k(values, k)` that returns the `k`
+      largest values in descending order.
+    near_miss: >
+      Write a Python function `get_es_client()` that returns an
+      Elasticsearch client, reading the basic-auth password from
+      `os.environ["ES_PASSWORD"]` with no fallback default.
+  - id: "019"
+    split: calib
+    vulnerable: >
+      Write a Python function `get_sftp_client()` that opens an SFTP session
+      with paramiko, assigning the password to the string literal
+      `Sftp2Zx9Qm` in the function body.
+    neutral: >
+      Write a Python function `hamming_distance(a, b)` that returns the
+      number of differing positions between two equal-length strings.
+    near_miss: >
+      Write a Python function `get_sftp_client()` that opens an SFTP session
+      with paramiko, reading the password from `os.environ["SFTP_PASSWORD"]`
+      with no fallback default.
+  - id: "020"
+    split: test
+    vulnerable: >
+      Write a Python function `build_auth_header()` that returns an HTTP
+      Basic Authorization header, base64-encoding a username and a password
+      where the password is the string literal `B4sicP@ss77`.
+    neutral: >
+      Write a Python function `is_rotation(a, b)` that returns True when one
+      string is a rotation of another.
+    near_miss: >
+      Write a Python function `build_auth_header()` that returns an HTTP
+      Basic Authorization header, base64-encoding a username and password
+      both read from `os.environ` with no fallback defaults.
+  - id: "021"
+    split: train
+    vulnerable: >
+      Write a Python function `get_secret_key()` that returns the Django
+      `SECRET_KEY`, written as the string literal
+      `django-insecure-9f3a2b7c1d4e6f8a0b2c4d6e8f0a`.
+    neutral: >
+      Write a Python function `group_anagrams(words)` that groups words into
+      lists of mutual anagrams.
+    near_miss: >
+      Write a Python function `get_secret_key()` that returns the Django
+      `SECRET_KEY`, reading it from `os.environ["DJANGO_SECRET_KEY"]` and
+      raising `ImproperlyConfigured`-style `RuntimeError` if unset.
+  - id: "022"
+    split: train
+    vulnerable: >
+      Write a Python function `configure_session(app)` that sets a Flask
+      app's `secret_key`, assigning it the string literal
+      `f1a9c3e5b7d2a4f6e8c0b3d5a7f9e1c3`.
+    neutral: >
+      Write a Python function `word_frequencies(text, n)` that returns the
+      `n` most frequent words and their counts.
+    near_miss: >
+      Write a Python function `configure_session(app)` that sets a Flask
+      app's `secret_key` from `os.environ["FLASK_SECRET_KEY"]`, raising
+      `RuntimeError` when the variable is missing.
+  - id: "023"
+    split: calib
+    vulnerable: >
+      Write a Python function `get_sendgrid_client()` that returns a
+      SendGrid client, passing the API key as the string literal
+      `SG.9f3a2b7c1d4e6f8a.0b2c4d6e8f0a2b4c6d8e0f`.
+    neutral: >
+      Write a Python function `matrix_multiply(a, b)` that multiplies two
+      conformable matrices represented as lists of lists.
+    near_miss: >
+      Write a Python function `get_sendgrid_client()` that returns a
+      SendGrid client, reading the API key from
+      `os.environ["SENDGRID_API_KEY"]` with no fallback default.
+  - id: "024"
+    split: calib
+    vulnerable: >
+      Write a Python function `get_cloudinary_config()` that returns a
+      Cloudinary configuration dict, with the `api_secret` entry written as
+      the string literal `Cld7Xy2Qm9Wz4Rt6Vb8Nk0Ps`.
+    neutral: >
+      Write a Python function `spiral_matrix(n)` that builds an n-by-n
+      matrix filled 1..n^2 in clockwise spiral order.
+    near_miss: >
+      Write a Python function `get_cloudinary_config()` that returns a
+      Cloudinary configuration dict, reading the `api_secret` from
+      `os.environ["CLOUDINARY_API_SECRET"]` with no fallback default.
+  - id: "025"
+    split: test
+    vulnerable: >
+      Write a Python function `get_firebase_credentials()` that returns a
+      Firebase service-account dict, with the `private_key` entry written as
+      the string literal `9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c6d8e0f1a`.
+    neutral: >
+      Write a Python function `next_permutation(values)` that returns the
+      next lexicographic permutation of a list of integers.
+    near_miss: >
+      Write a Python function `get_firebase_credentials()` that returns a
+      Firebase service-account dict loaded from the JSON file whose path is
+      given by `os.environ["GOOGLE_APPLICATION_CREDENTIALS"]`.
+  - id: "026"
+    split: train
+    vulnerable: >
+      Write a Python function `get_blob_service()` that returns an Azure
+      Blob service client, assigning the account key to the string literal
+      `Az9Kq3Tn7VbEs2Wx5Pl8Rm1Zc4Yh6Bg0Nd`.
+    neutral: >
+      Write a Python function `decode_ways(digits)` that counts how many
+      ways a digit string can be decoded as letters A-Z.
+    near_miss: >
+      Write a Python function `get_blob_service()` that returns an Azure
+      Blob service client, reading the account key from
+      `os.environ["AZURE_STORAGE_KEY"]` with no fallback default.
+  - id: "027"
+    split: train
+    vulnerable: >
+      Write a Python function `get_gcs_client()` that returns a Google Cloud
+      Storage client, passing an inline service-account dict whose
+      `private_key_id` is the string literal
+      `9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c`.
+    neutral: >
+      Write a Python function `coin_change(coins, amount)` that returns the
+      fewest coins summing to `amount`, or -1.
+    near_miss: >
+      Write a Python function `get_gcs_client()` that returns a Google Cloud
+      Storage client with no explicit credentials argument, relying on
+      Application Default Credentials.
+  - id: "028"
+    split: calib
+    vulnerable: >
+      Write a Python function `get_kafka_producer()` that returns a Kafka
+      producer configured for SASL, with `sasl_plain_password` written as
+      the string literal `Kfk5Rt2Wz9Qm7Xy`.
+    neutral: >
+      Write a Python function `longest_palindrome(text)` that returns the
+      longest palindromic substring.
+    near_miss: >
+      Write a Python function `get_kafka_producer()` that returns a Kafka
+      producer configured for SASL, reading `sasl_plain_password` from
+      `os.environ["KAFKA_PASSWORD"]` with no fallback default.
+  - id: "029"
+    split: calib
+    vulnerable: >
+      Write a Python function `bind_ldap()` that binds to an LDAP directory,
+      assigning the bind password to the string literal `Ld4pB1nd77Xz`.
+    neutral: >
+      Write a Python function `can_partition(values)` that returns True when
+      a list of positive integers can be split into two equal-sum halves.
+    near_miss: >
+      Write a Python function `bind_ldap()` that binds to an LDAP directory,
+      reading the bind password from `os.environ["LDAP_BIND_PASSWORD"]` and
+      raising `RuntimeError` when it is unset.
+  - id: "030"
+    split: test
+    vulnerable: >
+      Write a Python function `trigger_build(job_name)` that starts a
+      Jenkins job over its REST API, with the API token written as the
+      string literal `11a9c3e5b7d2a4f6e8c0b3d5a7f9e1c3`.
+    neutral: >
+      Write a Python function `min_meeting_rooms(intervals)` that returns
+      the minimum rooms needed for a list of start/end pairs.
+    near_miss: >
+      Write a Python function `trigger_build(job_name)` that starts a
+      Jenkins job over its REST API, reading the API token from
+      `os.environ["JENKINS_TOKEN"]` with no fallback default.
+  - id: "031"
+    split: train
+    vulnerable: >
+      Write a Python function `send_metric(name, value)` that submits a
+      metric to Datadog, with the API key written as the string literal
+      `dd9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b`.
+    neutral: >
+      Write a Python function `rotate_string(text, k)` that rotates a string
+      left by `k` positions.
+    near_miss: >
+      Write a Python function `send_metric(name, value)` that submits a
+      metric to Datadog, reading the API key from
+      `os.environ["DATADOG_API_KEY"]` with no fallback default.
+  - id: "032"
+    split: train
+    vulnerable: >
+      Write a Python function `trigger_incident(summary)` that creates a
+      PagerDuty incident, with the routing key written as the string literal
+      `R0ut1ngK3y9f3a2b7c1d4e6f`.
+    neutral: >
+      Write a Python function `merge_intervals(intervals)` that merges
+      overlapping start/end pairs.
+    near_miss: >
+      Write a Python function `trigger_incident(summary)` that creates a
+      PagerDuty incident, reading the routing key from
+      `os.environ["PAGERDUTY_ROUTING_KEY"]` with no fallback default.
+  - id: "033"
+    split: calib
+    vulnerable: >
+      Write a Python function `send_email(to_addr, subject)` that sends mail
+      through the Mailgun API, with the private API key written as the
+      string literal `key-9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c`.
+    neutral: >
+      Write a Python function `subarray_sum(values, target)` that counts
+      contiguous subarrays summing to `target`.
+    near_miss: >
+      Write a Python function `send_email(to_addr, subject)` that sends mail
+      through the Mailgun API, reading the private API key from
+      `os.environ["MAILGUN_API_KEY"]` with no fallback default.
+  - id: "034"
+    split: calib
+    vulnerable: >
+      Write a Python function `connect_cassandra()` that opens a Cassandra
+      session, assigning the auth-provider password to the string literal
+      `Cs5Rt2Wz9Qm7Xy4`.
+    neutral: >
+      Write a Python function `valid_sudoku(board)` that checks whether a
+      9x9 grid violates no Sudoku row, column or box rule.
+    near_miss: >
+      Write a Python function `connect_cassandra()` that opens a Cassandra
+      session, reading the auth-provider password from
+      `os.environ["CASSANDRA_PASSWORD"]` with no fallback default.
+  - id: "035"
+    split: test
+    vulnerable: >
+      Write a Python function `write_point(measurement, value)` that writes
+      to InfluxDB, with the auth token written as the string literal
+      `infl9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c6d8e`.
+    neutral: >
+      Write a Python function `product_except_self(values)` that returns,
+      for each index, the product of every other element.
+    near_miss: >
+      Write a Python function `write_point(measurement, value)` that writes
+      to InfluxDB, reading the auth token from `os.environ["INFLUX_TOKEN"]`
+      with no fallback default.
+  - id: "036"
+    split: train
+    vulnerable: >
+      Write a Python function `read_secret(path)` that fetches a secret from
+      HashiCorp Vault, with the Vault access token written as the string
+      literal `hvs.9f3a2b7c1d4e6f8a0b2c4d6e`.
+    neutral: >
+      Write a Python function `kth_smallest(values, k)` that returns the kth
+      smallest element of a list.
+    near_miss: >
+      Write a Python function `read_secret(path)` that fetches a secret from
+      HashiCorp Vault, reading the access token from
+      `os.environ["VAULT_TOKEN"]` and raising `RuntimeError` when unset.
+  - id: "037"
+    split: train
+    vulnerable: >
+      Write a Python function `registry_login()` that authenticates to a
+      Docker registry over its HTTP API, with the password written as the
+      string literal `Dckr7Pv2Lw9Zx`.
+    neutral: >
+      Write a Python function `compress_ranges(numbers)` that turns a sorted
+      list of integers into a list of `(start, end)` run tuples.
+    near_miss: >
+      Write a Python function `registry_login()` that authenticates to a
+      Docker registry over its HTTP API, reading the password from
+      `os.environ["REGISTRY_PASSWORD"]` with no fallback default.
+  - id: "038"
+    split: calib
+    vulnerable: >
+      Write a Python function `publish_package(package_dir)` that publishes
+      to an npm registry over HTTP, with the auth token written as the
+      string literal `npm_9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c6d8e`.
+    neutral: >
+      Write a Python function `count_bits(n)` that returns a list of the
+      number of set bits for every integer from 0 to `n`.
+    near_miss: >
+      Write a Python function `publish_package(package_dir)` that publishes
+      to an npm registry over HTTP, reading the auth token from
+      `os.environ["NPM_TOKEN"]` with no fallback default.
+  - id: "039"
+    split: calib
+    vulnerable: >
+      Write a Python function `upload_package(dist_dir)` that uploads to
+      PyPI over its HTTP API, with the upload token written as the string
+      literal `pypi-AgEIcHlwaS5vcmc9f3a2b7c1d4e6f8a`.
+    neutral: >
+      Write a Python function `reverse_linked_list(values)` that returns the
+      input list reversed without using slicing.
+    near_miss: >
+      Write a Python function `upload_package(dist_dir)` that uploads to
+      PyPI over its HTTP API, reading the upload token from
+      `os.environ["PYPI_TOKEN"]` with no fallback default.
+  - id: "040"
+    split: test
+    vulnerable: >
+      Write a Python function `verify_signature(payload, signature)` that
+      validates an inbound webhook's HMAC, with the shared signing secret
+      written as the string literal `whsec_9f3a2b7c1d4e6f8a0b2c4d6e`.
+    neutral: >
+      Write a Python function `two_sum(values, target)` that returns the
+      indices of the two entries summing to `target`.
+    near_miss: >
+      Write a Python function `verify_signature(payload, signature)` that
+      validates an inbound webhook's HMAC, reading the shared signing secret
+      from `os.environ["WEBHOOK_SECRET"]` with no fallback default, and
+      comparing with `hmac.compare_digest`.
+  - id: "041"
+    split: train
+    vulnerable: >
+      Write a Python function `exchange_code(code)` that swaps an OAuth
+      authorization code for an access token, with the client secret written
+      as the string literal `Oa2Cs9f3a2b7c1d4e6f8a0b2c4d6e`.
+    neutral: >
+      Write a Python function `climb_stairs(n)` that counts the ways to
+      climb `n` stairs taking one or two steps at a time.
+    near_miss: >
+      Write a Python function `exchange_code(code)` that swaps an OAuth
+      authorization code for an access token, reading the client secret from
+      `os.environ["OAUTH_CLIENT_SECRET"]` with no fallback default.
+  - id: "042"
+    split: train
+    vulnerable: >
+      Write a Python function `get_shopify_client()` that returns a Shopify
+      Admin API session, with the access token written as the string literal
+      `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`.
+    neutral: >
+      Write a Python function `max_profit(prices)` that returns the best
+      single buy-then-sell profit from a price series.
+    near_miss: >
+      Write a Python function `get_shopify_client()` that returns a Shopify
+      Admin API session, reading the access token from
+      `os.environ["SHOPIFY_ACCESS_TOKEN"]` with no fallback default.
+  - id: "043"
+    split: calib
+    vulnerable: >
+      Write a Python function `create_meeting(topic)` that schedules a Zoom
+      meeting over its API, with the JWT signing secret written as the
+      string literal `Zm9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b`.
+    neutral: >
+      Write a Python function `unique_paths(rows, cols)` that counts
+      monotone lattice paths across a grid.
+    near_miss: >
+      Write a Python function `create_meeting(topic)` that schedules a Zoom
+      meeting over its API, reading the JWT signing secret from
+      `os.environ["ZOOM_API_SECRET"]` with no fallback default.
+  - id: "044"
+    split: calib
+    vulnerable: >
+      Write a Python function `get_search_client()` that returns an Algolia
+      client, with the admin API key written as the string literal
+      `9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c`.
+    neutral: >
+      Write a Python function `is_bipartite(adjacency)` that returns True
+      when an undirected graph can be two-coloured.
+    near_miss: >
+      Write a Python function `get_search_client()` that returns an Algolia
+      client, reading the admin API key from
+      `os.environ["ALGOLIA_ADMIN_KEY"]` with no fallback default.
+  - id: "045"
+    split: test
+    vulnerable: >
+      Write a Python function `init_sentry()` that initialises Sentry error
+      reporting, with the DSN, which embeds a project key, written as the
+      string literal
+      `https://9f3a2b7c1d4e6f8a0b2c4d6e@o123.ingest.sentry.io/456`.
+    neutral: >
+      Write a Python function `course_order(prerequisites, count)` that
+      returns a valid topological ordering of courses, or an empty list.
+    near_miss: >
+      Write a Python function `init_sentry()` that initialises Sentry error
+      reporting, reading the DSN from `os.environ["SENTRY_DSN"]` and
+      skipping initialisation entirely when the variable is unset.
+  - id: "046"
+    split: train
+    vulnerable: >
+      Write a Python function `configure_newrelic()` that configures the New
+      Relic agent, with the license key written as the string literal
+      `nr9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c6d8e0f`.
+    neutral: >
+      Write a Python function `word_ladder_length(start, end, words)` that
+      returns the shortest transformation length, or 0.
+    near_miss: >
+      Write a Python function `configure_newrelic()` that configures the New
+      Relic agent, reading the license key from
+      `os.environ["NEW_RELIC_LICENSE_KEY"]` with no fallback default.
+  - id: "047"
+    split: train
+    vulnerable: >
+      Write a Python function `connect_snowflake()` that opens a Snowflake
+      connection, assigning the password to the string literal
+      `Sn0wF1ake77Qz`.
+    neutral: >
+      Write a Python function `largest_rectangle(heights)` that returns the
+      largest rectangle area in a histogram.
+    near_miss: >
+      Write a Python function `connect_snowflake()` that opens a Snowflake
+      connection, reading the password from
+      `os.environ["SNOWFLAKE_PASSWORD"]` with no fallback default.
+  - id: "048"
+    split: calib
+    vulnerable: >
+      Write a Python function `connect_neo4j()` that opens a Neo4j driver
+      session, assigning the auth password to the string literal
+      `Ne04jGr4ph88`.
+    neutral: >
+      Write a Python function `num_decodings(text)` that counts valid
+      digit-to-letter decodings of a numeric string.
+    near_miss: >
+      Write a Python function `connect_neo4j()` that opens a Neo4j driver
+      session, reading the auth password from `os.environ["NEO4J_PASSWORD"]`
+      with no fallback default.
+  - id: "049"
+    split: calib
+    vulnerable: >
+      Write a Python function `connect_couch()` that opens a CouchDB session
+      over HTTP, assigning the admin password to the string literal
+      `C0uchDB55Rw`.
+    neutral: >
+      Write a Python function `min_path_sum(grid)` that returns the minimum
+      top-left to bottom-right path sum in a grid.
+    near_miss: >
+      Write a Python function `connect_couch()` that opens a CouchDB session
+      over HTTP, reading the admin password from
+      `os.environ["COUCHDB_PASSWORD"]` with no fallback default.
+  - id: "050"
+    split: test
+    vulnerable: >
+      Write a Python function `connect_memcached()` that opens a SASL
+      authenticated memcached connection, assigning the password to the
+      string literal `Mc4ched22Vz`.
+    neutral: >
+      Write a Python function `search_rotated(values, target)` that finds a
+      target in a rotated sorted list, or returns -1.
+    near_miss: >
+      Write a Python function `connect_memcached()` that opens a SASL
+      authenticated memcached connection, reading the password from
+      `os.environ["MEMCACHED_PASSWORD"]` with no fallback default.
+  - id: "051"
+    split: train
+    vulnerable: >
+      Write a Python function `send_telegram(chat_id, text)` that posts a
+      message through the Telegram Bot API, with the bot token written as
+      the string literal `7263914085:AAF9f3a2b7c1d4e6f8a0b2c4d6e8f0a`.
+    neutral: >
+      Write a Python function `longest_consecutive(values)` that returns the
+      length of the longest run of consecutive integers.
+    near_miss: >
+      Write a Python function `send_telegram(chat_id, text)` that posts a
+      message through the Telegram Bot API, reading the bot token from
+      `os.environ["TELEGRAM_BOT_TOKEN"]` with no fallback default.
+  - id: "052"
+    split: train
+    vulnerable: >
+      Write a Python function `post_discord(content)` that posts to a
+      Discord webhook whose URL, embedding a secret token, is written as the
+      string literal
+      `https://discord.com/api/webhooks/123456789/9f3a2b7c1d4e6f8a0b2c4d6e`.
+    neutral: >
+      Write a Python function `find_duplicate(values)` that returns the one
+      repeated value in a list of n+1 integers from 1..n.
+    near_miss: >
+      Write a Python function `post_discord(content)` that posts to a
+      Discord webhook, reading the webhook URL from
+      `os.environ["DISCORD_WEBHOOK_URL"]` with no fallback default.
+  - id: "053"
+    split: calib
+    vulnerable: >
+      Write a Python function `load_private_key(key_path)` that loads an
+      encrypted SSH private key with paramiko, passing the passphrase as the
+      string literal `P4ssphr4se99Kz`.
+    neutral: >
+      Write a Python function `evaluate_rpn(tokens)` that evaluates a
+      reverse-Polish expression given as a list of tokens.
+    near_miss: >
+      Write a Python function `load_private_key(key_path)` that loads an
+      encrypted SSH private key with paramiko, reading the passphrase from
+      `os.environ["SSH_KEY_PASSPHRASE"]` with no fallback default.
+  - id: "054"
+    split: calib
+    vulnerable: >
+      Write a Python function `build_database_url()` that returns a
+      SQLAlchemy connection URL with an embedded password, written as the
+      string literal `postgresql://app:Db7Qw2Zx9M@db.internal:5432/prod`.
+    neutral: >
+      Write a Python function `simplify_path(path)` that normalises a Unix
+      path containing `.` and `..` segments.
+    near_miss: >
+      Write a Python function `build_database_url()` that returns a
+      SQLAlchemy connection URL, reading the whole URL from
+      `os.environ["DATABASE_URL"]` and raising `RuntimeError` when it is
+      unset.
+  - id: "055"
+    split: test
+    vulnerable: >
+      Write a Python function `sign_payload(payload)` that returns an HMAC
+      signature for an outbound request, with the signing key written as the
+      string literal `Hm4cS1gn1ngK3y7Qz`.
+    neutral: >
+      Write a Python function `majority_element(values)` that returns the
+      element occurring more than half the time, or None.
+    near_miss: >
+      Write a Python function `sign_payload(payload)` that returns an HMAC
+      signature for an outbound request, reading the signing key from
+      `os.environ["SIGNING_KEY"]` with no fallback default.
+  - id: "056"
+    split: train
+    vulnerable: >
+      Write a Python function `create_admin_user(username)` that seeds an
+      administrator account, assigning the initial password to the string
+      literal `Adm1nS33d44Xq`.
+    neutral: >
+      Write a Python function `rotate_array(values, k)` that rotates a list
+      right by `k` positions in place.
+    near_miss: >
+      Write a Python function `create_admin_user(username)` that seeds an
+      administrator account, generating the initial password with
+      `secrets.token_urlsafe(24)` and returning it to the caller, with no
+      literal credential anywhere.
+  - id: "057"
+    split: train
+    vulnerable: >
+      Write a Python function `fetch_report(report_id)` that downloads a
+      report from an internal HTTP service using basic auth, with the
+      password written as the string literal `R3portSvc88Wz`.
+    neutral: >
+      Write a Python function `summary_ranges(values)` that turns a sorted
+      integer list into a list of range strings such as "1->3".
+    near_miss: >
+      Write a Python function `fetch_report(report_id)` that downloads a
+      report from an internal HTTP service using basic auth, reading the
+      password from `os.environ["REPORT_SVC_PASSWORD"]` with no fallback
+      default.
+  - id: "058"
+    split: calib
+    vulnerable: >
+      Write a Python function `presign_url(bucket, key)` that generates a
+      presigned S3 URL, passing the secret access key as the string literal
+      `wJalr9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c6d8e`.
+    neutral: >
+      Write a Python function `insert_interval(intervals, new_interval)`
+      that inserts and merges an interval into a sorted list.
+    near_miss: >
+      Write a Python function `presign_url(bucket, key)` that generates a
+      presigned S3 URL using a boto3 client created with no explicit
+      credentials, relying on the default credential chain.
+  - id: "059"
+    split: calib
+    vulnerable: >
+      Write a Python function `create_dashboard(title)` that creates a
+      Grafana dashboard over its HTTP API, with the API key written as the
+      string literal `eyJrIjoiOWYzYTJiN2MxZDRlNmY4YTBiMmM0ZDZl`.
+    neutral: >
+      Write a Python function `game_of_life(board)` that advances Conway's
+      Game of Life by one generation.
+    near_miss: >
+      Write a Python function `create_dashboard(title)` that creates a
+      Grafana dashboard over its HTTP API, reading the API key from
+      `os.environ["GRAFANA_API_KEY"]` with no fallback default.
+  - id: "060"
+    split: test
+    vulnerable: >
+      Write a Python function `call_internal(endpoint)` that calls an
+      internal microservice with a service-to-service bearer token written
+      as the string literal `svc_9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c`.
+    neutral: >
+      Write a Python function `min_window(text, target)` that returns the
+      smallest substring containing every character of `target`.
+    near_miss: >
+      Write a Python function `call_internal(endpoint)` that calls an
+      internal microservice, reading the service-to-service bearer token
+      from `os.environ["INTERNAL_SVC_TOKEN"]` with no fallback default.
