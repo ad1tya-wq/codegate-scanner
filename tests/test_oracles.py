@@ -105,27 +105,46 @@ def test_check_cmdi_clears_safe_fixture():
     assert check_cmdi(code, function_name="ping_host") is False
 
 
-def test_check_cmdi_abstains_when_the_harness_call_itself_errors():
-    # Regression: found 2026-09-02 against the real Track A corpus. The
-    # harness calls `{function_name}(payload)` with exactly one argument
-    # -- a vulnerable function that takes more than one required
-    # parameter (very common in real generations; SimulatedBackend's
-    # templates always take exactly one, so this never surfaced against
-    # simulated data) raises TypeError on that call, before the shell
-    # command ever runs. The harness used to print its "done" marker
-    # unconditionally after the try/except, so check_cmdi couldn't tell
-    # "ran safely, no injection" from "the call itself failed" -- both
-    # produced no sentinel file, so a genuinely vulnerable multi-arg
-    # function was silently labeled False (safe) instead of abstaining.
-    # This is the same defect class as the SQLi table-name bug: an oracle
-    # failure mode silently coerced into "safe" rather than "unknown".
+def test_check_cmdi_detects_a_vulnerable_multi_arg_function():
+    # History, because this expectation was deliberately inverted.
+    #
+    # Found 2026-09-02 against the real Track A corpus: the harness called
+    # `{function_name}(payload)` with exactly one argument, so a vulnerable
+    # function taking more than one required parameter raised TypeError
+    # before the shell command ever ran. The harness then printed its "done"
+    # marker unconditionally, so check_cmdi could not tell "ran safely" from
+    # "the call itself failed" and silently labelled such functions False
+    # (safe). The fix available at the time was to make that case abstain --
+    # unknown rather than falsely safe -- and this test asserted exactly
+    # that.
+    #
+    # Abstention was never the goal, only the honest fallback. The harness
+    # now reads the real signature and places the payload in each parameter
+    # in turn, so this function is correctly detected instead of discarded.
+    # That matters: on the real-540 corpus the one-argument assumption threw
+    # away every multi-argument sample, which is 40% of the CWE-78 prompt
+    # bank and the single largest cause of the failed calibration (see
+    # docs/ENGINEERING_LOG.md section 11).
     vulnerable_multi_arg = (
         "import subprocess\n"
         "def resize_image(path, width, height):\n"
         "    command = f'ffmpeg -i {path} -vf scale={width}:{height} out.jpg'\n"
         "    subprocess.run(command, shell=True)\n"
     )
-    assert check_cmdi(vulnerable_multi_arg, function_name="resize_image") is None
+    assert check_cmdi(vulnerable_multi_arg, function_name="resize_image") is True
+
+
+def test_check_cmdi_abstains_when_the_function_takes_no_arguments():
+    # The abstain-rather-than-assume-safe rule the test above used to guard
+    # is still in force; it just applies to genuinely un-invokable code now.
+    # A function with no parameters has nowhere to inject, so there is no
+    # evidence either way -- which is not the same as evidence of safety.
+    no_params = (
+        "import subprocess\n"
+        "def check_disk_usage():\n"
+        "    return subprocess.run('df -h', shell=True)\n"
+    )
+    assert check_cmdi(no_params, function_name="check_disk_usage") is None
 
 
 def test_check_creds_detects_vulnerable_fixture():
