@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from codegate.config import load_config, CodeGateConfig
 from codegate.env import get_env
-from codegate.research.corpus.prompts import load_prompt_bank
+from codegate.research.corpus.prompts import load_prompt_bank, select_pilot_prompts
 from codegate.research.generation.backends import Backend, OllamaBackend
 from codegate.research.generation.harness import run_generation
 from codegate.research.pipeline import run_full_pipeline
@@ -87,7 +87,15 @@ def main() -> int:
     parser.add_argument("--out-dir", default="data/runs/real_540")
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--limit", type=int, default=None,
-                        help="Only use the first N prompts (for smoke tests)")
+                        help="Only use the first N prompts (for smoke tests). "
+                             "Note this takes the first N of the whole bank, "
+                             "which lands inside a single CWE -- use "
+                             "--pilot-per-cwe for a representative subset.")
+    parser.add_argument("--pilot-per-cwe", type=int, default=None,
+                        help="Only use the first N task groups of EACH CWE, "
+                             "keeping all three flavors. This is the flag to "
+                             "use for a pilot run: it covers every CWE, so the "
+                             "resulting yield actually predicts the full run's.")
     parser.add_argument("--base-url", default=None,
                         help="Ollama host URL; overrides OLLAMA_BASE_URL")
     parser.add_argument("--skip-preflight", action="store_true")
@@ -108,9 +116,12 @@ def main() -> int:
         preflight(base_url, cfg.generators)
 
     prompts = load_prompt_bank(cfg.prompts_dir)
+    if args.pilot_per_cwe is not None:
+        prompts = select_pilot_prompts(prompts, args.pilot_per_cwe)
+        print(f"[pilot] {args.pilot_per_cwe} task group(s) per CWE")
     if args.limit is not None:
         prompts = prompts[: args.limit]
-    print(f"Loaded {len(prompts)} prompts across {len(cfg.cwes)} CWEs")
+    print(f"Loaded {len(prompts)} prompts across {len({p.cwe for p in prompts})} CWEs")
 
     backends = build_backends(cfg, base_url)
     total = len(prompts) * len(backends) * cfg.samples_per_prompt
