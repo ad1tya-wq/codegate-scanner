@@ -1,4 +1,5 @@
 from __future__ import annotations
+import re
 import tempfile
 import uuid
 from pathlib import Path
@@ -6,6 +7,8 @@ from codegate.oracles.ast_utils import function_exists
 from codegate.oracles.invocation import HARNESS_PRELUDE
 from codegate.oracles.sandbox import run_sandboxed
 
+
+_FUTURE_IMPORT = re.compile(r"^from __future__ import .*$", re.MULTILINE)
 
 _SHELL_SINK_MARKERS = (
     "subprocess", "os.system", "os.popen", "os.exec", "os.spawn",
@@ -60,8 +63,6 @@ def check_cmdi(code: str, function_name: str) -> bool | None:
         payload_host = f"127.0.0.1 & echo pwned > {sentinel}"
 
         harness = f"""
-{HARNESS_PRELUDE}
-
 _fn = {function_name}
 _params = positional_params(_fn)
 _payload = {payload_host!r}
@@ -110,7 +111,17 @@ else:
 
 print("CODEGATE_DONE" if _observed else "CODEGATE_NOEVIDENCE")
 """
-        full_source = code + "\n" + harness
+        # Preamble first, then the generated code, then the harness. The
+        # preamble installs the missing-module stub finder, and the
+        # generated code's imports run at module level -- putting the code
+        # first means `import psycopg2` dies before the finder exists.
+        # `from __future__` is stripped because it is only legal as a
+        # file's first statement and the code is no longer first.
+        full_source = (
+            HARNESS_PRELUDE + "\n"
+            + _FUTURE_IMPORT.sub("", code) + "\n"
+            + harness
+        )
         # Raised from 5s: the harness now makes one call per parameter
         # inside a single process instead of exactly one call overall.
         result = run_sandboxed(full_source, harness="", timeout_s=15.0)

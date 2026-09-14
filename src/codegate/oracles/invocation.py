@@ -60,7 +60,83 @@ def takes_connection(param_names: list[str]) -> bool:
     return bool(param_names) and param_names[0].lower() in CONNECTION_PARAM_NAMES
 
 
+# Modules that must NEVER be stubbed out, whatever happens. Stubbing any of
+# these would make the oracle observe a fake sink and report SAFE for code
+# that is in fact injectable -- a silent false-safe, the worst failure this
+# labeller can produce. They are all stdlib and therefore always importable,
+# so the guard should be unreachable; it exists because the cost of being
+# wrong here is a corrupted corpus rather than a crash.
+NEVER_STUB = (
+    "subprocess", "os", "sys", "sqlite3", "shlex", "shutil", "pathlib",
+    "builtins", "importlib", "io", "tempfile",
+)
+
 HARNESS_PRELUDE = f"""
+NEVER_STUB = {NEVER_STUB!r}
+
+
+def _install_missing_module_stubs():
+    # Generated code frequently imports a driver the labelling machine does
+    # not have -- psycopg2 above all. That ImportError fires at module level,
+    # before the target function is even defined, so the sample abstains
+    # without the oracle ever seeing its SQL. Worse, it abstains
+    # *systematically*: every Postgres-flavored sample is dropped, biasing
+    # the corpus toward sqlite idiom, which is precisely the distribution
+    # shift the certificate is meant to survive.
+    #
+    # This finder is appended to the END of sys.meta_path, so every real
+    # finder gets first refusal and only genuinely absent modules reach it.
+    import sys
+    import types
+    from importlib.machinery import ModuleSpec
+
+    def _stub_getattr(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+        return _make_stub(name)
+
+    class _StubMeta(type):
+        def __getattr__(cls, name):
+            if name.startswith("__"):
+                raise AttributeError(name)
+            return _make_stub(name)
+
+    def _make_stub(name):
+        # Subclasses Exception so `except psycopg2.Error:` is legal --
+        # catching a non-BaseException raises TypeError at handling time.
+        return _StubMeta(name, (Exception,), {{
+            "__getattr__": _stub_getattr,
+            "__enter__": lambda self: self,
+            "__exit__": lambda self, *exc: False,
+            "__iter__": lambda self: iter(()),
+            "__len__": lambda self: 0,
+        }})
+
+    class _StubLoader:
+        def create_module(self, spec):
+            mod = types.ModuleType(spec.name)
+            # __path__ makes the stub a package, so a dotted import like
+            # `mysql.connector` resolves its submodule through this finder
+            # too instead of raising "'mysql' is not a package".
+            mod.__path__ = []
+            mod.__getattr__ = lambda name: _make_stub(name)
+            return mod
+
+        def exec_module(self, module):
+            return None
+
+    class _StubFinder:
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname.split(".")[0] in NEVER_STUB:
+                return None
+            return ModuleSpec(fullname, _StubLoader())
+
+    sys.meta_path.append(_StubFinder())
+
+
+_install_missing_module_stubs()
+
+
 NUMERIC_HINTS = {NUMERIC_HINTS!r}
 DATE_HINTS = {DATE_HINTS!r}
 COLUMN_HINTS = {COLUMN_HINTS!r}

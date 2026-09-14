@@ -1368,3 +1368,80 @@ rejected as too false-positive-prone. Recorded as a known limitation.
 **Status:** oracle mechanism `SOLID` (89 oracle tests, including a
 ground-truth suite pinning every defect above). Corpus yield `NEEDS WORK` —
 the two causes in 12.5 come before any new generation run.
+
+### 12.6 · The recording DB-API shim (2026-09-14)
+
+Cause 1 from 12.5 is fixed. `src/codegate/oracles/dbapi_recorder.py` gives
+the SQLi oracle a connection object that runs generated code against real
+SQLite while capturing the SQL string each `execute()` was actually handed.
+
+**Why the observation point moved twice.** The original oracle judged by
+row count. The first repair moved to SQLite's own trace callback. Both
+require SQLite to have *accepted* the statement — and models answer in
+Postgres idiom regardless of the prompt naming sqlite3: `%s` paramstyle,
+`with conn.cursor() as cur:`, `import psycopg2`. SQLite rejects all of it,
+so nothing is prepared, the callback never fires, and an injectable
+function is discarded as unjudgeable.
+
+Recording at the call boundary decides the question the oracle actually
+asks — did the caller's input reach the query as *text* or as a bound
+parameter — before SQLite sees anything:
+
+```
+execute("... WHERE u = '" + name + "'")   -> payload in the SQL string
+execute("... WHERE u = ?",  (name,))      -> payload in the parameters
+execute("... WHERE u = %s", (name,))      -> payload in the parameters
+```
+
+It is still a dynamic oracle: the code genuinely runs, and SQL assembled
+across f-strings, helper calls or loops is observed as finally built, which
+no static match can do. A useful simplification falls out — detection no
+longer needs valid SQL, so the second column-shaped payload and the
+literal-aware quote scanner the trace-callback design required for
+`ORDER BY` injection are both gone. One payload, one rule.
+
+**A second, independent blocker.** `import psycopg2` raises at module level
+*before* the target function is defined, so the sample died on the import.
+The harness now installs a `sys.meta_path` finder that stubs only modules
+that are genuinely absent — appended last, so every real finder gets first
+refusal. Stub classes subclass `Exception` so `except psycopg2.Error:` is
+legal, and carry `__path__` so `import mysql.connector` resolves. A
+`NEVER_STUB` denylist covers `subprocess`, `os`, `sqlite3` and friends:
+stubbing one of those would make the oracle observe a fake sink and report
+SAFE for injectable code, which is the worst output this labeller can
+produce. Those are all stdlib and always importable, so the guard should be
+unreachable — it exists because being wrong there corrupts the corpus
+silently rather than crashing.
+
+Ordering is load-bearing and was got wrong once: the preamble must precede
+the generated code, or the stub finder does not exist yet when the code's
+imports run. `from __future__` statements are stripped from both embedded
+fragments, since neither is the file's first statement any more.
+
+**Measured on the same 516 samples:**
+
+| | s11 baseline | after 12.3 | after the shim |
+|---|---|---|---|
+| abstention rate | 28.3% | 24.4% | **19.2%** |
+| vulnerable rate (decided) | 10.0% | 17.7% | 18.7% |
+| CWE-89 vulnerable -> VULN | 4 / 58 | 21 / 58 | **30 / 58** |
+| CWE-89 vulnerable -> ABSTAIN | 39 / 58 | 25 / 58 | **7 / 58** |
+| CWE-89 near_miss -> ABSTAIN | 38 / 58 | 21 / 58 | **12 / 58** |
+| n_vuln_calib | 8 | 24 | 25 |
+
+`n_vuln_calib` barely moved because the recovered samples landed mostly in
+the train and test splits — calibration is only 5 of 15 task groups. That
+is a prompt-bank allocation problem, not an oracle one, and it is what the
+60-group expansion addresses.
+
+**Projection for the expanded bank.** Per-CWE vulnerable-flavor yield now
+measures 68% (CWE-78), 52% (CWE-89), 17% (CWE-798). At 60 task groups per
+CWE with a 24/24/12 split, the calibration split carries 24 groups x 4
+generators = 96 vulnerable-flavor samples per CWE, giving roughly
+65 + 50 + 16 = **131 vulnerable calibration samples** against the target of
+120. Raising CWE-798's yield by pinning the literal in its prompts (cause 2
+in 12.5) would put it near 170.
+
+**Status:** SQLi oracle `SOLID`. 125 oracle tests, including 21 for the
+shim alone covering both paramstyles, cursor context managers, invalid SQL,
+and the never-stub guard.

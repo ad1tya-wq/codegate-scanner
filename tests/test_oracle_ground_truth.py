@@ -148,6 +148,96 @@ def test_sqli_oracle_abstains_when_the_function_is_absent():
     assert check_sqli(VULN_SELECT_2ARG, "not_a_real_function") is None
 
 
+# --- Postgres idiom and absent drivers -------------------------------------
+#
+# Models frequently answer in psycopg2 style regardless of the prompt naming
+# sqlite3. Two separate things used to kill those samples: SQLite rejecting
+# `%s` paramstyle and `with conn.cursor()`, and `import psycopg2` raising
+# ImportError at module level before the function was even defined. Between
+# them that accounted for 19 of the 25 remaining CWE-89 abstentions on the
+# real-540 corpus -- and it dropped them *systematically*, biasing the
+# corpus toward sqlite idiom, which is the exact distribution shift the
+# certificate is supposed to survive.
+
+PG_PERCENT_FORMAT_SPLICE = '''
+import psycopg2
+def delete_order(conn, order_id):
+    cursor = conn.cursor()
+    query = "DELETE FROM orders WHERE id = %s;" % order_id
+    cursor.execute(query)
+    conn.commit()
+'''
+
+PG_BOUND_WITH_DRIVER_EXCEPTION = '''
+import psycopg2
+from psycopg2 import OperationalError
+def get_user(conn, username):
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE username = %s", (username,))
+        return cur.fetchall()
+    except OperationalError:
+        return None
+'''
+
+PG_CURSOR_CONTEXT_MANAGER_SPLICE = '''
+def search_products(conn, keyword):
+    sql = f"SELECT * FROM products WHERE name LIKE '%{keyword}%'"
+    with conn.cursor() as cursor:
+        cursor.execute(sql)
+        return cursor.fetchall()
+'''
+
+DOTTED_ABSENT_IMPORT_SPLICE = '''
+import pymongo
+import mysql.connector
+def get_user(conn, username):
+    return conn.execute(
+        "SELECT * FROM users WHERE username = '" + username + "'").fetchall()
+'''
+
+DOTTED_ABSENT_IMPORT_BOUND = '''
+from mysql.connector import errors
+def get_user(conn, username):
+    return conn.execute(
+        "SELECT * FROM users WHERE username = ?", (username,)).fetchall()
+'''
+
+
+@pytest.mark.parametrize("code,fn", [
+    (PG_PERCENT_FORMAT_SPLICE, "delete_order"),
+    (PG_CURSOR_CONTEXT_MANAGER_SPLICE, "search_products"),
+    (DOTTED_ABSENT_IMPORT_SPLICE, "get_user"),
+])
+def test_sqli_oracle_detects_injection_in_postgres_idiom(code, fn):
+    assert check_sqli(code, fn) is True
+
+
+@pytest.mark.parametrize("code,fn", [
+    (PG_BOUND_WITH_DRIVER_EXCEPTION, "get_user"),
+    (DOTTED_ABSENT_IMPORT_BOUND, "get_user"),
+])
+def test_sqli_oracle_clears_bound_parameters_in_postgres_idiom(code, fn):
+    assert check_sqli(code, fn) is False
+
+
+def test_a_stubbed_absent_import_never_masks_a_real_shell_sink():
+    """
+    The stub finder must never stand in for a module the oracle observes
+    through. If `subprocess` were ever stubbed, every command-injection
+    sample would report SAFE -- a silent false-safe, which is the worst
+    output this labeller can produce.
+    """
+    code = (
+        "import subprocess\n"
+        "import some_module_that_does_not_exist\n"
+        "def ping_host(host):\n"
+        "    return subprocess.run('ping -c 1 ' + host,\n"
+        "                          shell=True, capture_output=True)\n"
+    )
+    assert check_cmdi(code, "ping_host") is True
+
+
 # --- CWE-78: OS command injection ------------------------------------------
 
 VULN_CMDI_1ARG = '''

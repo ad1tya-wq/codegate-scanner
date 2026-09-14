@@ -1,5 +1,8 @@
 from __future__ import annotations
+import re
+
 from codegate.oracles.ast_utils import function_exists
+from codegate.oracles.dbapi_recorder import RECORDER_SOURCE
 from codegate.oracles.invocation import HARNESS_PRELUDE
 from codegate.oracles.sandbox import run_sandboxed
 
@@ -35,42 +38,27 @@ _FIXTURE_ROW_2 = (
     "'bob','Book Two','body two','2024-06-01',7,'w2',2,2,2,2,2,1"
 )
 
-# Two payload shapes are needed, and they are detected by different rules.
-#
-# The VALUE payload carries single quotes. SQLite doubles them when it
-# expands a bound parameter ("nonexistent'' OR ''1''=''1"), so the raw
-# string can only appear in the executed SQL if the code spliced it --
-# a plain substring test is exact.
-#
-# The IDENT payload has to be valid in an identifier position (a value
-# payload there is a syntax error that raises before anything is observed),
-# so it contains nothing SQLite would escape -- which means binding leaves
-# it byte-identical and a plain substring test would flag every
-# parameterized query. It is instead detected by quote context: a bound
-# parameter always expands to 'payload' with adjacent quotes, while an
-# identifier splice does not. The comment marker makes accidental matches
-# against real column names impossible.
-_VALUE_PAYLOAD = "nonexistent' OR '1'='1"
-_IDENT_PAYLOAD = "id /*cg_9f3a2b*/"
+# One payload is enough. Detection happens at the execute() call boundary,
+# before SQLite parses anything, so this works in an identifier position
+# (`ORDER BY <payload>`, invalid SQL that SQLite would never prepare) just
+# as well as in a value position. The trace-callback design this replaced
+# needed a second, column-shaped payload plus a literal-aware scan to tell
+# a splice from a bound parameter; neither is necessary now.
+_PAYLOAD = "nonexistent' OR '1'='1"
 
 _SQL_SINK_MARKERS = (
     ".execute", ".executemany", ".executescript", "cursor",
     "select ", "insert ", "update ", "delete ", "sqlite3", "psycopg", "sqlalchemy",
 )
 
+_FUTURE_IMPORT = re.compile(r"^from __future__ import .*$", re.MULTILINE)
+
 _HARNESS_TEMPLATE = '''
-import sqlite3
-{prelude}
-
 _TABLES = {tables!r}
-_VALUE_PAYLOAD = {value_payload!r}
-_IDENT_PAYLOAD = {ident_payload!r}
-# (payload, detection mode) -- see the module-level comment on why the two
-# shapes cannot share one rule.
-_PAYLOADS = ((_VALUE_PAYLOAD, "raw"), (_IDENT_PAYLOAD, "unquoted"))
+_PAYLOAD = {payload!r}
 
 
-def _fresh_conn():
+def _fresh_real_conn():
     conn = sqlite3.connect(":memory:")
     for _t in _TABLES:
         conn.execute("CREATE TABLE " + _t + " ({columns})")
@@ -80,69 +68,18 @@ def _fresh_conn():
     return conn
 
 
-def _unquoted_spans(sql):
-    # Index ranges of `sql` lying outside single-quoted string literals.
-    # SQLite escapes a quote inside a literal by doubling it, so '' is a
-    # literal quote rather than a terminator.
-    spans = []
-    i = 0
-    n = len(sql)
-    start = 0
-    in_literal = False
-    while i < n:
-        if sql[i] == "'":
-            if in_literal:
-                if i + 1 < n and sql[i + 1] == "'":
-                    i += 2
-                    continue
-                in_literal = False
-                start = i + 1
-            else:
-                if start < i:
-                    spans.append((start, i))
-                in_literal = True
-        i += 1
-    if not in_literal and start < n:
-        spans.append((start, n))
-    return spans
+_fn = {function_name}
 
 
-def _is_spliced(statements, payload, mode):
-    for sql in statements:
-        if mode == "raw":
-            # Quotes in the payload are doubled when SQLite expands a bound
-            # parameter, so a verbatim match proves concatenation outright.
-            if payload in sql:
-                return True
-        else:
-            # Nothing in this payload gets escaped, so binding leaves it
-            # byte-identical -- it is only evidence of injection when it
-            # lands OUTSIDE a string literal, i.e. in identifier position.
-            # Checking quote adjacency is not enough: a bound value can be
-            # wrapped inside its literal, as LIKE '%' + value + '%' does.
-            for _a, _b in _unquoted_spans(sql):
-                if payload in sql[_a:_b]:
-                    return True
-    return False
-
-
-def _invoke(fn, args):
-    conn = _fresh_conn()
-    seen = []
-    conn.set_trace_callback(seen.append)
+def _invoke(args):
+    recorder = SqlRecorder()
     try:
-        fn(conn, *args)
+        _fn(RecordingConnection(_fresh_real_conn(), recorder), *args)
     except Exception:
         pass
-    finally:
-        try:
-            conn.set_trace_callback(None)
-        except Exception:
-            pass
-    return seen
+    return recorder
 
 
-_fn = {function_name}
 _params = positional_params(_fn)
 _names = [p.name for p in _params]
 _free = _params[1:] if takes_connection(_names) else []
@@ -151,28 +88,24 @@ _fired = False
 _observed = False
 
 if _free:
-    # Control run first: benign arguments throughout. If the function
-    # executes SQL here it is genuinely exercisable, which is what lets a
-    # later "no payload was spliced" result mean safe rather than unknown.
-    # Without this, code that correctly rejects a malicious identifier
-    # (the standard whitelist mitigation) would abstain on every payload
-    # and be discarded, even though it is exactly the safe shape the
-    # corpus needs.
+    # Control run first, with benign arguments. Code that validates its
+    # input and rejects the payload -- a whitelist raising ValueError is
+    # the standard mitigation for an identifier position, which cannot be
+    # parameterized -- would otherwise never be observed doing anything,
+    # and would abstain despite being exactly the safe shape the corpus
+    # needs labelled.
     _benign = [benign_value_for(p.name) for p in _free]
-    if _invoke(_fn, _benign):
+    if _invoke(_benign).observed:
         _observed = True
 
-    for _payload, _mode in _PAYLOADS:
-        for _i in range(len(_free)):
-            _args = list(_benign)
-            _args[_i] = _payload
-            _seen = _invoke(_fn, _args)
-            if _seen:
-                _observed = True
-            if _is_spliced(_seen, _payload, _mode):
-                _fired = True
-                break
-        if _fired:
+    for _i in range(len(_free)):
+        _args = list(_benign)
+        _args[_i] = _PAYLOAD
+        _recorder = _invoke(_args)
+        if _recorder.observed:
+            _observed = True
+        if _recorder.payload_was_spliced(_PAYLOAD):
+            _fired = True
             break
 
 if _fired:
@@ -199,27 +132,57 @@ def has_sql_sink(code: str) -> bool:
     return any(marker in lowered for marker in _SQL_SINK_MARKERS)
 
 
+def _build_source(code: str, function_name: str) -> str:
+    """
+    Assemble the sandbox script: preamble, then the generated code, then
+    the invocation harness.
+
+    Order is load-bearing. The preamble installs the missing-module stub
+    finder, and the generated code's own imports run at module level -- so
+    a script that put the generated code first would hit `import psycopg2`
+    before the finder existed and die there. `from __future__` imports are
+    stripped from both embedded sources because such a statement is only
+    legal as the first statement in a file, and neither fragment is first
+    any more; `annotations` is the only one in practice and dropping it
+    changes nothing that matters here.
+    """
+    return (
+        "import sqlite3\n"
+        + _FUTURE_IMPORT.sub("", RECORDER_SOURCE) + "\n"
+        + HARNESS_PRELUDE + "\n"
+        + _FUTURE_IMPORT.sub("", code) + "\n"
+        + _HARNESS_TEMPLATE.format(
+            tables=_FIXTURE_TABLES,
+            columns=_FIXTURE_COLUMNS,
+            row1=_FIXTURE_ROW_1,
+            row2=_FIXTURE_ROW_2,
+            payload=_PAYLOAD,
+            function_name=function_name,
+        )
+    )
+
+
 def check_sqli(code: str, function_name: str) -> bool | None:
     """
-    Detonates the generated function and observes the SQL it actually
-    executes, via sqlite3's trace callback.
+    Detonates the generated function against a recording DB-API connection
+    and observes the SQL it hands to `execute()`.
 
-    Returns True when a payload reaches the executed SQL text verbatim --
-    direct proof the value was concatenated into the query rather than
-    bound. SQLite escapes bound parameters when it expands a statement
-    ("nonexistent'' OR ''1''=''1"), so a parameterized query can never
-    produce a verbatim match, whatever the payload. Returns False only when
-    SQL was observed to run and no payload was spliced: a "safe" verdict
-    always rests on positive evidence. Returns None when the function is
-    absent, takes no database connection, or nothing observable ran --
-    unjudgeable, which is not the same as safe.
+    Returns True when the payload reaches a statement as query *text*
+    rather than as a bound parameter -- which is precisely what SQL
+    injection is. Returns False only when SQL was observed to run and the
+    payload never reached it as text: a "safe" verdict always rests on
+    positive evidence. Returns None when the function is absent, takes no
+    database connection, or issued no SQL at all -- unjudgeable, which is
+    not the same as safe.
 
-    This replaces a row-count heuristic that could only see injections
-    widening a SELECT. That heuristic labelled injectable DELETE, UPDATE,
-    INSERT, ORDER BY and LIKE code *safe*, and labelled correctly
-    parameterized SELECT COUNT(*) code *vulnerable* -- both of which put
-    wrong labels into the corpus rather than merely dropping samples. See
-    docs/ENGINEERING_LOG.md section 11.
+    Two earlier designs were replaced. A row-count heuristic could only see
+    injections that widened a SELECT, so it labelled injectable DELETE,
+    UPDATE and INSERT code *safe* and parameterized SELECT COUNT(*) code
+    *vulnerable*. A SQLite trace callback fixed that but still required
+    SQLite to have accepted the statement, which lost every sample written
+    in Postgres idiom -- 19 of 25 remaining CWE-89 abstentions on the
+    real-540 corpus. Recording at the call boundary depends on neither.
+    See docs/ENGINEERING_LOG.md sections 11 and 12.
     """
     if not has_sql_sink(code):
         return False  # no SQL anywhere: confidently safe, not "unknown"
@@ -227,20 +190,12 @@ def check_sqli(code: str, function_name: str) -> bool | None:
     if not function_exists(code, function_name):
         return None
 
-    harness = _HARNESS_TEMPLATE.format(
-        prelude=HARNESS_PRELUDE,
-        tables=_FIXTURE_TABLES,
-        columns=_FIXTURE_COLUMNS,
-        row1=_FIXTURE_ROW_1,
-        row2=_FIXTURE_ROW_2,
-        value_payload=_VALUE_PAYLOAD,
-        ident_payload=_IDENT_PAYLOAD,
-        function_name=function_name,
+    # 15s rather than the original 5s: the harness makes up to n_params + 1
+    # invocations inside one process instead of a single call. Still one
+    # subprocess per sample, so corpus-scale wall clock is unchanged.
+    result = run_sandboxed(
+        _build_source(code, function_name), harness="", timeout_s=15.0
     )
-    # Raised from 5s: the harness now performs up to 2 x n_params invocations
-    # inside one process rather than a single call. Still one subprocess per
-    # sample, so corpus-scale wall clock is essentially unchanged.
-    result = run_sandboxed(code + "\n" + harness, harness="", timeout_s=15.0)
 
     if result.timed_out:
         return None
