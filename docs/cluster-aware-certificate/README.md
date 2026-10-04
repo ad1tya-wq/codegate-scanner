@@ -1,7 +1,8 @@
 # Cluster-aware certificate
 
 **Status:** implemented and shipped on this branch (2026-10-04).
-Full record with every number and command: `docs/ENGINEERING_LOG.md` §13.
+Full record with every number and command: `docs/ENGINEERING_LOG.md` §13
+(the figures below are from the retrain in §13.1).
 
 ## The problem
 
@@ -61,19 +62,19 @@ of runs that certified a threshold truly missing more than α was:
 
 The allowed rate is 0.05.
 
-**It holds on data it never saw.** At the shipped threshold (`t̂ = 0.8276`,
-α = 0.10), 8.4% of vulnerable test-split samples are auto-approved, or 6.8%
-averaged per task group (95% cluster bootstrap 0.8–15.2%). Both are within
+**It holds on data it never saw.** At the shipped threshold (`t̂ = 0.8259`,
+α = 0.10), 9.3% of vulnerable test-split samples are auto-approved, or 7.6%
+averaged per task group (95% cluster bootstrap 0.8–16.7%). Both are within
 the 10% target.
 
 **Generator shift.** The experiment was fixed to calibrate on the
 calibration split and judge each held-out model on data the ranker never
-trained on. Three of four models stay within 10% (2.4%, 2.9%, 5.6%).
+trained on. Three of four models stay within 10% (2.9%, 3.7%, 7.0%).
 Codegemma comes in at 11.0% (10 of 91, P = 0.43 under a true 10% rate, so
 within noise). The old certificate gave 13.2% for codegemma on the same
 experiment.
 
-**The cost.** Coverage drops from 56.4% to 48.9% at α = 0.10. At α = 0.05
+**The cost.** Coverage drops from 56.4% to 48.8% at α = 0.10. At α = 0.05
 the honest certificate approves only 29.2%, which is why the shipped
 operating point stays at 0.10.
 

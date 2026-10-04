@@ -20,7 +20,7 @@ fast, not waiting on a real API call in front of the panel:
 codegate scan examples/vulnerable_app
 ```
 
-Run this once now. It calls Groq for the 11 escalated units and caches
+Run this once now. It calls Groq for the 10 escalated units and caches
 every result by content hash — the same command during the actual demo
 will be instant (all cache hits, `llm calls made: 0`).
 
@@ -80,8 +80,8 @@ errs on the side of escalating: a safe function sent for review costs
 one LLM call, while a vulnerable one waved through would break the
 guarantee."*
 
-Point at the summary table: `Auto-approved 3 / Escalated 11 / Findings 14`
-(14 functions: semgrep's 3 real findings plus 11 escalated for review).
+Point at the summary table: `Auto-approved 4 / Escalated 10 / Findings 13`
+(semgrep's 3 real findings plus the 10 functions escalated for review).
 On a target this small the strict threshold escalates most functions;
 that costs LLM calls, never misses.
 
@@ -140,15 +140,15 @@ isn't finished yet.
 
 | Question | Answer |
 |---|---|
-| How many tests? | 435, all passing (CI runs on Python 3.11 and 3.13) |
+| How many tests? | 442, all passing (CI runs on Python 3.11 and 3.13) |
 | How many CWEs? | 3 — SQL injection, OS command injection, hardcoded credentials |
 | Certified guarantee? | At most 10% of vulnerable functions auto-approved, 95% confidence (α = 0.10, δ = 0.05), counting each task once; 5% also certified via `--alpha 0.05` |
-| Does it hold on unseen data? | Yes: 6.8% per task (8.4% per sample) of held-out vulnerable code auto-approved, against 10% |
-| Precision / recall without the verifier? | 0.25 / 1.00 on the demo app: catches every vulnerability, escalates most safe code |
+| Does it hold on unseen data? | Yes: 7.6% per task (9.3% per sample) of held-out vulnerable code auto-approved, against 10% |
+| Precision / recall without the verifier? | 0.27 / 1.00 on the demo app: catches every vulnerability, escalates most safe code |
 | Precision with the verifier? | Not yet re-measured on the real model (was 1.00 on the simulated one) |
-| Ranker accuracy? | ROC-AUC 0.891 on held-out data it never trained on |
+| Ranker accuracy? | ROC-AUC 0.889 on held-out data it never trained on |
 | Real corpus size? | 2,040 samples: 510 prompts × 4 models (qwen2.5-coder, deepseek-coder, codellama, codegemma) |
-| Real corpus abstention rate? | 6.7% (was 28.3% before the labeller fixes, see section 12) |
+| Real corpus abstention rate? | 6.6% (was 28.3% before the labeller fixes, see section 12) |
 | Does it generalize to a new model? | Calibrated on 3 models, tested on the 4th: 3 of 4 within 10%; codegemma 11.0% (10 of 91, not significant) |
 | Cost per scan? | Estimated, disclosed as an estimate; demo app costs under $0.001 with the verifier on |
 

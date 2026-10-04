@@ -208,12 +208,12 @@ PNGs land in `data/eval/` (gitignored — regenerate locally with
 | Metric | Result | What it means |
 |---|---|---|
 | Oracle accuracy on ground-truth fixtures | **6/6** | The three oracles (SQLi, cmdi, creds) agree with their textbook examples |
-| Corpus size / vulnerable rate / abstentions | **2,040 / 26.9% / 6.7%** | Real code from 4 local models (qwen2.5-coder, deepseek-coder, codellama, codegemma), 510 prompts each; abstentions are samples no oracle could judge, excluded rather than counted as safe |
-| Ranker separation (ROC-AUC), held-out test split | **0.891** | How well the score separates vulnerable from safe code the ranker never saw (0.926 including its training data) |
-| Certified threshold | **t̂ = 0.8276 @ α = 0.10, δ = 0.05** (cluster-aware, 66 task groups) | Of vulnerable functions, at most 10% score above this, with 95% confidence; 49% of calibration code clears it. α = 0.05 is also certified (t̂ = 0.9088, 29% coverage) via `--alpha 0.05` |
-| Held-out check of that guarantee | **6.8% per task group, 8.4% per sample** | Share of vulnerable test-split code the threshold auto-approves, against the 10% target (95% cluster bootstrap 0.8–15.2%) |
-| Generator shift (calibrate on 3 models, test on the 4th, unseen data only) | **3 of 4 within α = 0.10** | Realized 2.4%, 2.9%, 5.6%, and 11.0% for codegemma (10 of 91; not significant, P = 0.43) |
-| End-to-end scan vs. real ground truth, static + gate only | **precision 0.25, recall 1.00, F1 0.40** | Catches every real vulnerability in the demo app; the strict threshold escalates 11 of 14 functions, which costs LLM calls, not misses |
+| Corpus size / vulnerable rate / abstentions | **2,040 / 26.8% / 6.6%** | Real code from 4 local models (qwen2.5-coder, deepseek-coder, codellama, codegemma), 510 prompts each; abstentions are samples no oracle could judge, excluded rather than counted as safe |
+| Ranker separation (ROC-AUC), held-out test split | **0.889** | How well the score separates vulnerable from safe code the ranker never saw (0.925 including its training data) |
+| Certified threshold | **t̂ = 0.8259 @ α = 0.10, δ = 0.05** (cluster-aware, 66 task groups) | Of vulnerable functions, at most 10% score above this, with 95% confidence; 49% of calibration code clears it. α = 0.05 is also certified (t̂ = 0.9091, 29% coverage) via `--alpha 0.05` |
+| Held-out check of that guarantee | **7.6% per task group, 9.3% per sample** | Share of vulnerable test-split code the threshold auto-approves, against the 10% target (95% cluster bootstrap 0.8–16.7%) |
+| Generator shift (calibrate on 3 models, test on the 4th, unseen data only) | **3 of 4 within α = 0.10** | Realized 2.9%, 3.7%, 7.0%, and 11.0% for codegemma (10 of 91; not significant, P = 0.43) |
+| End-to-end scan vs. real ground truth, static + gate only | **precision 0.27, recall 1.00, F1 0.43** | Catches every real vulnerability in the demo app; the strict threshold escalates 10 of 14 functions, which costs LLM calls, not misses |
 | End-to-end scan vs. real ground truth, **with LLM verifier** | *not yet re-run on the real model* | Was precision 1.00 / recall 1.00 on the earlier simulated model; needs a Groq key and live API calls to re-measure |
 
 **Why the certificate is cluster-aware.** The 206 vulnerable calibration

@@ -35,7 +35,7 @@ Four status labels are used throughout:
 | — | Evaluation & metrics (`research/eval/metrics.py`, `scripts/run_eval.py`) | SOLID (mechanism) / PROVISIONAL (ranker-quality numbers, per §6) | — | 187 passed |
 | 8 | Retrain on real corpus (join point) | SOLID — first attempt (516 samples, §11) certified nothing; after the oracle repairs and the 2,160-sample run, certified and shipped as `real-2040-sym` at α = 0.10 (§12) | `13d8b83`–`e7723fc` | 416 passed |
 
-Current test suite: **435 passed**, 0 failed, ~10 min wall clock (2026-10-04)
+Current test suite: **442 passed**, 0 failed, ~10 min wall clock (2026-10-04)
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -892,12 +892,12 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-435 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
-counts per file regenerated 2026-10-04).
+442 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+counts per file regenerated 2026-10-05).
 
 | File | Tests | Protects |
 |---|---|---|
-| `test_oracle_ground_truth.py` | 151 | Hand-verified labels for all three oracles, each pinning a defect found on real corpora: arity and statement-type cases for SQLi; Postgres idiom; multi-argument, allowlist, suffix-check, `int()`-cast, post-spawn-parse and module-level-demo-call cases for cmdi; every CWE-798 secret shape, each with an environment-sourced negative twin |
+| `test_oracle_ground_truth.py` | 158 | Hand-verified labels for all three oracles, each pinning a defect found on real corpora: arity and statement-type cases for SQLi; Postgres idiom; multi-argument, allowlist, suffix-check, `int()`-cast, post-spawn-parse and module-level-demo-call cases for cmdi; every CWE-798 secret shape, each with an environment-sourced negative twin |
 | `test_oracles.py` | 24 | Core oracle contracts: `function_exists`, sandbox execution/timeout/exit-code capture, detection on fixtures, consensus rule v2 (including refusing to coerce a missing verdict), semgrep hit/clear on fixtures |
 | `test_dbapi_recorder.py` | 21 | Recording DB-API connection: paramstyle translation, statement capture through cursors and shortcuts, splice-vs-bound detection |
 | `test_corpus.py` | 17 | Prompt bank loading and shape: 60 groups per CWE, 24/24/12 splits, pinned signatures and arity spread, pinned CWE-798 literals, pilot selection |
@@ -1827,3 +1827,66 @@ most α". That is not what LTT bounds. It now says of vulnerable
 functions, at most α are auto-approved.
 
 **Status:** `SOLID`. 435 tests pass.
+
+### 13.1 · Retrain after the creds-oracle review fixes (2026-10-05)
+
+A code review of the branch found two false-positive shapes in
+`check_creds`, both fixed test-first (commit `2c88e71`):
+
+- A name ending in a pointer word (`TOKEN_URL`, `SECRET_KEY_FILE`,
+  `private_key_id`) was read as holding a secret. `_is_secret_name` now
+  rejects names whose last word is in `_POINTER_SUFFIXES`.
+- `connect(host, 22, "deploy", password=os.environ["PW"])` flagged the
+  username, because the last positional argument of a credential call was
+  taken as the password even when the password came by keyword.
+
+Fixing the first exposed a gap: a full PEM private key was never matched,
+because its newlines fail the no-whitespace rule. Five service-account
+samples had been caught only through their `private_key_id` field. PEM
+private-key headers are now a known key shape.
+
+```
+python scripts/train_from_pregenerated.py data/runs/real_sym/generations.parquet --out-dir data/runs/real_sym_retrain --corpus-version real-2040-sym
+python scripts/run_eval.py --model-dir data/runs/real_sym_retrain
+```
+
+**Labels.** Three of 2,040 changed, all in the train split, so the
+calibration data is unchanged:
+
+| sample | prompt | old → new | why |
+|---|---|---|---|
+| `fc92eb38-0` | CWE-798-027-vulnerable | VULN → SAFE | holds only `private_key_id` and a `YOUR_PRIVATE_KEY` placeholder |
+| `6c2e3eaf-0` | CWE-798-027-vulnerable | VULN → SAFE | same |
+| `76aba915-0` | CWE-78-042-vulnerable | ABSTAIN → VULN | timing, not the fix (below) |
+
+`76aba915-0` is genuinely injectable (`os.system(f"npm install
+{package_name}")`), but its example call runs a real `npm install express`
+at import. That takes about 11 s against the oracle's 15 s timeout, so
+under the load of a full labelling run it can time out and abstain. It is
+the only sample of 2,040 whose label differed between two full runs. A
+timeout is an abstention, never a SAFE, so the failure mode is safe.
+
+Prompt CWE-798-027 pins `private_key_id` as its secret. That is an
+identifier, so the prompt cannot reliably elicit a hardcoded secret. It
+should pin `private_key` before any future generation run.
+
+**Promoted.** The retrained model does marginally worse on held-out data:
+one more vulnerable test sample crosses the threshold. It was promoted
+anyway, because its labels are more correct, and keeping the old model on
+the strength of its test-split numbers would be selecting a model on the
+test set.
+
+| | before (§13) | **after** |
+|---|---|---|
+| t̂ at α = 0.10 / coverage (calib) | 0.8276 / 48.9% | **0.8259 / 48.8%** |
+| α = 0.05 | t̂ 0.9088, 29.2% | t̂ 0.9091, 29.2% |
+| held-out vulnerable auto-approved | 8.4% per sample (9/107), 6.8% per group (CI 0.8–15.2%) | **9.3% per sample (10/107), 7.6% per group** (CI 0.8–16.7%) |
+| ranker ROC-AUC, held-out (full corpus) | 0.891 (0.926) | 0.889 (0.925) |
+| generator shift: codegemma / codellama / deepseek / qwen | 11.0 / 2.9 / 2.4 / 5.6% | 11.0 / 2.9 / 3.7 / 7.0% |
+| demo app, static + gate | 3 / 11; P 0.25, R 1.00 | 4 auto-approved / 10 escalated; P 0.27, R 1.00 |
+| corpus: abstentions / vulnerable among decided | 136 (6.7%) / 26.9% | 135 (6.6%) / 26.8% |
+
+Ranker scores moved by a median of 0.002; the largest moves (up to 0.16)
+are the relabelled CWE-798-027 samples and their siblings.
+
+**Status:** `SOLID`. 442 tests pass.

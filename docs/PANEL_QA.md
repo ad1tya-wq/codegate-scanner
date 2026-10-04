@@ -50,7 +50,7 @@ It's deliberately simple:
    (vulnerable/neutral/near_miss) = **540 prompts**, × 4 generators ×
    1 sample/prompt = 2,160 planned samples. The shipped corpus is the
    **2,040** of those that all four models answered (510 prompts × 4, see
-   below): 1,904 labelled after 136 abstentions, **206 vulnerable
+   below): 1,905 labelled after 135 abstentions, **206 vulnerable
    calibration samples** (`n_vuln_calib: 206` in the shipped
    `calibration.json`). The split is a property of the prompt, not of the
    run.
@@ -76,15 +76,15 @@ scripts/run_eval.py`, `docs/ENGINEERING_LOG.md` §12.10–12.11):
 
 | Metric | Value |
 |---|---|
-| Corpus | 2,040 samples (510 prompts × 4 models); 6.7% abstained; 26.9% of decided samples vulnerable |
-| Ranker ROC-AUC, held-out test split | **0.891** (0.926 including its own training data) |
-| Certified `t_hat` (shipped operating point) | **0.8276 at α = 0.10, δ = 0.05**, cluster-aware over 66 task groups; 48.9% of calibration code auto-approved |
-| Also certified | 0.9088 at α = 0.05 (29.2% coverage), via `codegate scan --alpha 0.05` |
+| Corpus | 2,040 samples (510 prompts × 4 models); 6.6% abstained; 26.8% of decided samples vulnerable |
+| Ranker ROC-AUC, held-out test split | **0.889** (0.925 including its own training data) |
+| Certified `t_hat` (shipped operating point) | **0.8259 at α = 0.10, δ = 0.05**, cluster-aware over 66 task groups; 48.8% of calibration code auto-approved |
+| Also certified | 0.9091 at α = 0.05 (29.2% coverage), via `codegate scan --alpha 0.05` |
 | `n_vuln_calib` | 206 samples in 66 task groups |
-| Held-out check | 6.8% per task group (8.4% per sample) of unseen vulnerable code auto-approved, against 10%; 95% cluster bootstrap 0.8–15.2% |
-| Generator shift (calibrate on 3 models, test the 4th on unseen data) | 3 of 4 within α = 0.10 (2.4%, 2.9%, 5.6%); codegemma 11.0% (10 of 91, P = 0.43) |
+| Held-out check | 7.6% per task group (9.3% per sample) of unseen vulnerable code auto-approved, against 10%; 95% cluster bootstrap 0.8–16.7% |
+| Generator shift (calibrate on 3 models, test the 4th on unseen data) | 3 of 4 within α = 0.10 (2.9%, 3.7%, 7.0%); codegemma 11.0% (10 of 91, P = 0.43) |
 | Oracle accuracy (fixtures) | 6/6 |
-| Demo app, static + gate only | precision 0.25, recall 1.00 |
+| Demo app, static + gate only | precision 0.27, recall 1.00 |
 | Demo app, with the verifier | not yet re-measured on this model (simulated model: 1.00 / 1.00) |
 
 **For comparison — the simulated model it replaced:** 540 samples,
@@ -309,9 +309,9 @@ groups, and each threshold is tested with the Hoeffding–Bentkus p-value
 for bounded losses (the one the LTT paper uses). That needs only *task
 groups* to be exchangeable, which kept its promise in every simulated
 setting.
-At α = 0.10 it gives t̂ = 0.8276, auto-approving 49% of code instead of 56%,
-and on held-out data it auto-approves 6.8% of vulnerable code per task
-(8.4% per sample), within target. Fixing the generator-shift experiment
+At α = 0.10 it gives t̂ = 0.8259, auto-approving 49% of code instead of 56%,
+and on held-out data it auto-approves 7.6% of vulnerable code per task
+(9.3% per sample), within target. Fixing the generator-shift experiment
 the same day (it had been calibrating on training data) leaves 3 of 4
 models within 10% and codegemma at 11.0%, which is within noise.
 

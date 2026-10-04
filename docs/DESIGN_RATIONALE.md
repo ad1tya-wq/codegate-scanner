@@ -321,7 +321,7 @@ proves the framework *notices* when it doesn't hold, rather than
 silently reporting a false guarantee. A "normal" threshold has no
 mechanism to detect this at all. On the real corpus, calibrating on three
 models and testing on the fourth's unseen data, three of four stay within
-α = 0.10 (2.4%, 2.9%, 5.6%) and codegemma comes in at 11.0% (10 of 91, not
+α = 0.10 (2.9%, 3.7%, 7.0%) and codegemma comes in at 11.0% (10 of 91, not
 significant).
 
 The honest limit of this claim is the exchangeability assumption itself,
@@ -329,7 +329,7 @@ and this project hit it. Four models answering the same task give
 correlated samples, and the standard per-sample test was optimistic for
 them: on held-out data its α = 0.10 threshold missed 13.1%. The shipped
 certificate counts each task group once instead (Hoeffding–Bentkus over
-per-group miss fractions). It stays within target on held-out data (6.8%
+per-group miss fractions). It stays within target on held-out data (7.6%
 per task) and kept its promise in every simulated setting, where the
 per-sample test broke it 8.5–12% of the time.
 
@@ -339,11 +339,11 @@ per-sample test broke it 8.5–12% of the time.
 certificate can't clear" is either exhaustive LLM review (correct, but
 doesn't scale to CI-pipeline latencies or costs) or static-analysis-only
 (scales fine, but has no mechanism to bound what it's missing). On the
-demo app, the shipped real-data model auto-approves 3 of 14 functions with
+demo app, the shipped real-data model auto-approves 4 of 14 functions with
 no LLM call at all, under a certificate that at most 10% of vulnerable
-functions get auto-approved. It escalates the other 11 to the verifier,
+functions get auto-approved. It escalates the other 10 to the verifier,
 one cached call each. Static + gate alone already reaches recall 1.00,
-with precision 0.25: every real vulnerability is caught, and most safe
+with precision 0.27: every real vulnerability is caught, and most safe
 code on this small target is escalated. The verifier's job is to clear those, and its effect on
 this model has not been re-measured yet. On the earlier simulated model
 it took precision from 0.50 to 1.00.
@@ -351,8 +351,8 @@ it took precision from 0.50 to 1.00.
 ```mermaid
 flowchart LR
     A["14 functions\n(examples/vulnerable_app/)"] --> B{"Certified gate\n(alpha = 0.10)"}
-    B -->|"3 auto-approved\n0 LLM calls"| C["Certificate: at most 10%\nof vulnerable functions\nget here (95% confidence)"]
-    B -->|"11 escalated"| D{"LLM verifier\n11 calls, cached"}
+    B -->|"4 auto-approved\n0 LLM calls"| C["Certificate: at most 10%\nof vulnerable functions\nget here (95% confidence)"]
+    B -->|"10 escalated"| D{"LLM verifier\n10 calls, cached"}
     D -->|"confirmed"| E["Real findings"]
     D -->|"cleared"| F["Correctly\nleft alone"]
 ```

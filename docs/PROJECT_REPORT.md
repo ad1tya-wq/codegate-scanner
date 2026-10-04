@@ -229,7 +229,7 @@ Repository layout:
 | `scripts/` | Corpus generation, relabelling, training from a shipped corpus, evaluation, corpus repair |
 | `data/prompts/` | The prompt bank (YAML) |
 | `data/model/` | The shipped model and certificate |
-| `tests/` | 435 automated tests |
+| `tests/` | 442 automated tests |
 | `examples/vulnerable_app/` | Demo target with known ground truth |
 
 ---
@@ -593,8 +593,8 @@ codegate calibrate [--real] [--out-dir DIR]     # rebuild model + certificate (d
 
 - **Test-driven fixes.** Every defect fix in the oracle work started as a
   failing test reproducing the real sample. The test was then made to pass,
-  and the full suite rerun. The suite has **435 tests**. The largest file,
-  `tests/test_oracle_ground_truth.py` (151 tests), pins hand-verified labels
+  and the full suite rerun. The suite has **442 tests**. The largest file,
+  `tests/test_oracle_ground_truth.py` (158 tests), pins hand-verified labels
   for every defect found on real data. Most detection tests have a
   deliberately safe twin, so a loosened detector shows up as a failure.
 - **Guardrail: tests assert structure, never model values.** Retraining
@@ -758,12 +758,12 @@ it now uses the calibration split and unseen data only.
 | Generated (full run) | 2,156 of 2,160 |
 | Repaired (stale answers removed, splits corrected) | 2,078 |
 | **Shipped corpus** (prompts answered by all 4 models) | **2,040 = 510 prompts × 4** |
-| Abstentions | 136 (6.7%) |
-| Vulnerable among decided | 26.9% |
+| Abstentions | 135 (6.6%) |
+| Vulnerable among decided | 26.8% |
 | Splits (samples) | train 820 / calib 812 / test 408 |
 
 Abstention on the same pipeline was 28.3% in September and 19.2% after the
-first repairs, and is 6.5–6.7% now.
+first repairs, and is 6.5–6.6% now.
 
 ### 9.2 The certificate (shipped)
 
@@ -773,10 +773,10 @@ Cluster-aware: 206 vulnerable calibration samples in 66 task groups.
 
 | α | t̂ | coverage | vulnerable calibration samples |
 |---|---|---|---|
-| 0.05 | 0.9088 | 29.2% | 206 (66 groups) |
-| **0.10 (shipped)** | **0.8276** | **48.9%** | 206 (66 groups) |
-| 0.20 | 0.7559 | 60.6% | 206 (66 groups) |
-| 0.30 | 0.7351 | 64.1% | 206 (66 groups) |
+| 0.05 | 0.9091 | 29.2% | 206 (66 groups) |
+| **0.10 (shipped)** | **0.8259** | **48.8%** | 206 (66 groups) |
+| 0.20 | 0.7634 | 60.3% | 206 (66 groups) |
+| 0.30 | 0.7440 | 63.7% | 206 (66 groups) |
 
 For comparison, the per-sample binomial certificate it replaced gave
 t̂ = 0.7763 (56.4% coverage) at α = 0.10.
@@ -785,10 +785,10 @@ t̂ = 0.7763 (56.4% coverage) at α = 0.10.
 
 | Measure | Result |
 |---|---|
-| Ranker ROC-AUC, held-out test split | **0.891** (0.926 including training data) |
-| Held-out test split, share of vulnerable code auto-approved | **6.8% per task group, 8.4% per sample** vs α = 0.10 (95% cluster bootstrap 0.8–15.2%) |
-| Generator shift (calibrate on 3, test the 4th on unseen data) | 3 of 4 within α = 0.10: 2.4% (deepseek), 2.9% (codellama), 5.6% (qwen); codegemma 11.0% (10 of 91, P = 0.43) |
-| Demo app, static + gate only | precision 0.25, recall 1.00 (3 of 14 auto-approved) |
+| Ranker ROC-AUC, held-out test split | **0.889** (0.925 including training data) |
+| Held-out test split, share of vulnerable code auto-approved | **7.6% per task group, 9.3% per sample** vs α = 0.10 (95% cluster bootstrap 0.8–16.7%) |
+| Generator shift (calibrate on 3, test the 4th on unseen data) | 3 of 4 within α = 0.10: 2.9% (codellama), 3.7% (deepseek), 7.0% (qwen); codegemma 11.0% (10 of 91, P = 0.43) |
+| Demo app, static + gate only | precision 0.27, recall 1.00 (4 of 14 auto-approved) |
 | Demo app, with verifier | not yet re-measured on the real model |
 
 ---
@@ -833,7 +833,7 @@ bank is, not something the statistics can check.
 
 ```
 pip install -e ".[dev,research]"
-python -m pytest tests/ -q                                  # 435 tests
+python -m pytest tests/ -q                                  # 442 tests
 
 # label a corpus with the current oracles
 python scripts/relabel.py --generations <generations.parquet> --out-dir <dir>

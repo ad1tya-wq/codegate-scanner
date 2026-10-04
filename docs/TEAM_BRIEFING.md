@@ -180,18 +180,18 @@ attempt certified nothing. See Part 3.
 
 ## Current status
 
-Every phase is built and tested: 435 automated tests, all passing
+Every phase is built and tested: 442 automated tests, all passing
 locally. CI runs on `main`, so it runs once this branch is merged. The
 shipped model is now **trained and certified on real LLM-generated code**:
 
 | | |
 |---|---|
 | Corpus | 2,040 samples: 510 prompts answered by each of 4 local models (qwen2.5-coder, deepseek-coder, codellama, codegemma) |
-| Certificate | `t_hat = 0.8276` at α = 0.10, δ = 0.05, cluster-aware over 66 task groups; 49% of calibration code auto-approved. α = 0.05 is also certified (`--alpha 0.05`, 29% coverage) |
-| Held-out check | 6.8% per task (8.4% per sample) of unseen vulnerable code auto-approved, against 10% |
-| Ranker accuracy | ROC-AUC 0.891 on held-out data |
+| Certificate | `t_hat = 0.8259` at α = 0.10, δ = 0.05, cluster-aware over 66 task groups; 49% of calibration code auto-approved. α = 0.05 is also certified (`--alpha 0.05`, 29% coverage) |
+| Held-out check | 7.6% per task (9.3% per sample) of unseen vulnerable code auto-approved, against 10% |
+| Ranker accuracy | ROC-AUC 0.889 on held-out data |
 | Generator shift | Calibrated on 3 models, tested on the 4th (unseen data): 3 of 4 within 10%; codegemma 11.0%, not significant |
-| Demo app | Catches every vulnerability (recall 1.00); precision 0.25 before the verifier |
+| Demo app | Catches every vulnerability (recall 1.00); precision 0.27 before the verifier |
 
 ## How we got here — the honest version
 
@@ -228,7 +228,7 @@ The fix: **count each task once.** The cluster-aware certificate averages
 each task's miss fraction and tests that with the Hoeffding–Bentkus bound
 for bounded losses, the same bound the original LTT paper uses. In
 simulation it kept its promise in every setting. On held-out data it
-misses 6.8% per task (8.4% per sample), within 10%. It costs coverage:
+misses 7.6% per task (9.3% per sample), within 10%. It costs coverage:
 49% of code is auto-approved instead of 56%.
 
 ## What's left
