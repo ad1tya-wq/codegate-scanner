@@ -20,13 +20,14 @@ fast, not waiting on a real API call in front of the panel:
 codegate scan examples/vulnerable_app
 ```
 
-Run this once now. It calls Groq for the 5 escalated units and caches
+Run this once now. It calls Groq for the 8 escalated units and caches
 every result by content hash — the same command during the actual demo
 will be instant (all cache hits, `llm calls made: 0`).
 
 **Have a backup ready** in case live network/API access is flaky in the
 room: `examples/vulnerable_app/sample_report.pdf` is already committed
-and open-able with zero commands. If anything about the live LLM call
+and open-able with zero commands (generated from the shipped model with
+`--no-llm`, so it shows the static + gate result, not verifier output). If anything about the live LLM call
 fails during the demo, say so plainly and fall back to `--no-llm` or the
 committed PDF — do not stall trying to debug it live.
 
@@ -56,11 +57,13 @@ codegate info
 ```
 
 *"CodeGate ships with a trained model and a certificate already
-calibrated in the repo, so this runs with zero setup. This table is the
-actual statistical guarantee — at this threshold, at most 5% of what we
-auto-approve is vulnerable, with 95% confidence. It's flagged
-PROVISIONAL right now because it's calibrated on a simulated corpus
-while we scale up real training data — more on that if you ask."*
+calibrated in the repo, so this runs with zero setup. The model was
+trained on about two thousand code samples written by four real LLMs,
+and every sample was labelled by actually running it against an attack.
+This table is the statistical guarantee: of the vulnerable functions it
+sees, at most 10% score above this threshold and get auto-approved, with
+95% confidence. A stricter 5% threshold is also certified, if you want
+it."*
 
 ### Step 2 — static and certified gate only (about 2 minutes)
 
@@ -70,12 +73,14 @@ codegate scan examples/vulnerable_app --no-llm
 
 *"This is semgrep plus our certified model gate, no LLM involved yet.
 Semgrep deterministically catches all three real vulnerabilities: SQL
-injection, command injection, hardcoded credentials. The model gate also
-escalates a few of the actually-safe functions for review, since the
-certificate is still provisional — that's expected and disclosed, not
-hidden."*
+injection, command injection, hardcoded credentials. The gate
+auto-approves the functions it can certify and escalates the rest. It
+errs on the side of escalating: a safe function sent for review costs
+one LLM call, while a vulnerable one waved through would break the
+guarantee."*
 
-Point at the summary table: `Auto-approved 9 / Escalated 5 / Findings 8`.
+Point at the summary table: `Auto-approved 6 / Escalated 8 / Findings 11`
+(14 functions: semgrep's 3 real findings plus 8 escalated for review).
 
 ### Step 3 — with the LLM verifier (about 2 minutes)
 
@@ -88,11 +93,13 @@ so a repeat scan costs nothing — that's why this just ran instantly,
 we warmed the cache earlier. Watch what happens to those false
 positives."*
 
-Point out: findings drop from 8 to 5, precision goes from 0.50 to 1.00
-on this target (mention the number directly — it's real, measured, and
-in `docs/ENGINEERING_LOG.md` section 10 and `data/eval/metrics.json` if
-anyone wants to check it against the underlying numbers). Every
-remaining finding is a real, correctly-attributed vulnerability.
+Point out how many of the escalated functions the verifier clears.
+**Rehearse this step once beforehand** (it also warms the cache) and
+note the findings count and precision from your own run. This step has
+not been re-measured since the real model shipped: on the earlier
+simulated model the verifier took precision from 0.50 to 1.00, but don't
+quote that figure for this model. To get the number, run
+`python scripts/run_eval.py --with-llm` and read `data/eval/metrics.json`.
 
 ### Step 4 — the report (about 2 minutes)
 
@@ -108,24 +115,21 @@ with the assumptions printed alongside it.
 
 ### Step 5 — if asked "did you test this on real code?" (have this ready)
 
-*"Yes — we generated a real 516-sample corpus from four different
-Ollama models, labeled it with the same dynamic detonation oracles, and
-re-ran the whole pipeline on it this week. That real run actually
-surfaced two genuine bugs in our labeling logic that the simulated
-corpus had never triggered — a markdown-extraction gap and a
-process-hang in the sandbox — both found and fixed. The corpus itself
-is still too small to certify a new threshold: only 8 vulnerable samples
-landed in the calibration split, and the statistics need more evidence
-than that before we swap the shipped model. That's a sample-size
-problem, not a mechanism problem — the certificate math and the whole
-pipeline are proven correct against real data; we just need a bigger
-real corpus before we can certify against it. Full numbers are in
-`docs/ENGINEERING_LOG.md` section 11."*
+*"Yes, and the shipped model is trained on it. Four local models each
+answered the same 510 prompts, about two thousand samples in all. Every
+sample was labelled by detonating it, not by pattern matching. Our first
+real run failed to certify anything, and that turned out to be bugs in
+our own labeller, not too little data. We fixed them, measured each fix
+against data we already had, and the next run certified. We also held
+out one model at a time: a certificate calibrated on three models held
+on the fourth, for all four. What we don't claim yet: our samples
+cluster by prompt, which makes the guarantee somewhat optimistic, so we
+ship at 10% rather than 5% until a cluster-aware certificate is done.
+Numbers are in `docs/ENGINEERING_LOG.md` section 12."*
 
 This is a strong answer if asked directly — it shows the team tested
-against reality, found real bugs, and is honest about what isn't
-finished yet, rather than either hiding the gap or claiming something
-uncertified is production-ready.
+against reality, found and fixed real problems, and says plainly what
+isn't finished yet.
 
 ## 4 · Numbers to have ready if asked
 
@@ -133,10 +137,13 @@ uncertified is production-ready.
 |---|---|
 | How many tests? | 416, all passing (CI runs on Python 3.11 and 3.13) |
 | How many CWEs? | 3 — SQL injection, OS command injection, hardcoded credentials |
-| Precision without the verifier? | 0.50 on the demo app (semgrep alone catches everything, model gate over-escalates) |
-| Precision with the verifier? | 1.00 on the demo app, live-verified against Groq |
-| Real corpus size? | 516 samples, 4 generator models, 33.3% vulnerable by design |
-| Real corpus abstention rate? | 28.3%, understood and explained (see section 11) |
+| Certified guarantee? | At most 10% of vulnerable functions auto-approved, 95% confidence (α = 0.10, δ = 0.05); 5% also certified via `--alpha 0.05` |
+| Precision / recall without the verifier? | 0.33 / 1.00 on the demo app: catches every vulnerability, over-escalates safe code |
+| Precision with the verifier? | Not yet re-measured on the real model (was 1.00 on the simulated one) |
+| Ranker accuracy? | ROC-AUC 0.891 on held-out data it never trained on |
+| Real corpus size? | 2,040 samples: 510 prompts × 4 models (qwen2.5-coder, deepseek-coder, codellama, codegemma) |
+| Real corpus abstention rate? | 6.7% (was 28.3% before the labeller fixes, see section 12) |
+| Does it generalize to a new model? | Calibrated on 3 models, tested on the 4th: held for all 4 |
 | Cost per scan? | Estimated, disclosed as an estimate; demo app costs under $0.001 with the verifier on |
 
 ## 5 · If something breaks live
