@@ -55,3 +55,19 @@ def test_load_config_ignores_a_leftover_split_ratios_key(tmp_path):
     cfg = load_config(str(cfg_path))
     assert cfg.prompts_per_cwe == 1
     assert not hasattr(cfg, "split_ratios")
+
+
+def test_config_selects_the_cluster_aware_certificate():
+    cfg = load_config(str(REPO_ROOT / "config.yaml"))
+    assert cfg.certificate == "cluster"
+
+
+def test_config_defaults_to_cluster_and_rejects_unknown_certificates(tmp_path):
+    base = ("alpha: 0.05\ndelta: 0.05\nrandom_seed: 1\ncwes: [CWE-89]\nflavors: [vulnerable]\n"
+            "generators: [model-a]\nverifier: model-c\nsamples_per_prompt: 1\nprompts_per_cwe: 1\n"
+            "paths: {prompts_dir: x, fixtures_dir: y, runs_dir: z}\n")
+    (tmp_path / "a.yaml").write_text(base)
+    assert load_config(str(tmp_path / "a.yaml")).certificate == "cluster"
+    (tmp_path / "b.yaml").write_text(base + "certificate: magic\n")
+    with pytest.raises(ValueError, match="certificate"):
+        load_config(str(tmp_path / "b.yaml"))

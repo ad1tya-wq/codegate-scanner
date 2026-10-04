@@ -43,6 +43,17 @@ class Calibration:
     is_provisional: bool
     created_at: str
     frontier: list[dict] = field(default_factory=list)
+    # Which LTT test produced t_hat: "cluster-hb" (task groups are the unit of
+    # evidence) or "sample-binomial" (each sample is). Files written before
+    # this field existed were all sample-binomial.
+    method: str = "sample-binomial"
+    n_vuln_groups: int | None = None
+
+    def method_description(self) -> str:
+        """How t_hat was certified, in words, for reports."""
+        if self.method == "cluster-hb":
+            return f"cluster-aware: {self.n_vuln_groups} task groups (Hoeffding-Bentkus)"
+        return "per-sample binomial"
 
     def certified_alphas(self) -> list[float]:
         alphas = {row["alpha"] for row in self.frontier if row.get("t_hat") is not None}
@@ -118,6 +129,8 @@ def save_calibration(
         is_provisional=is_provisional,
         created_at=datetime.now(timezone.utc).isoformat(),
         frontier=rows,
+        method=result.method,
+        n_vuln_groups=result.n_vuln_groups,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(asdict(calib), indent=2))

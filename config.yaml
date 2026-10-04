@@ -1,11 +1,13 @@
 # CodeGate frozen run parameters. Change here, not in code.
 alpha: 0.10              # certified max miss-rate: P(auto-approve | vulnerable) <= alpha
-                         # Operating at 0.10 for now (decided 2026-10-04): 0.05 also certifies
-                         # on the real corpus, but its calibration samples cluster by prompt,
-                         # which makes the binomial certificate optimistic. 0.10 keeps margin
-                         # until a cluster-aware certificate exists. `codegate scan --alpha 0.05`
-                         # still uses the certified 0.05 threshold. See ENGINEERING_LOG 12.10-12.11.
+                         # With the cluster-aware certificate below, 0.10 certifies a threshold
+                         # that auto-approves ~49% of code; 0.05 also certifies but only ~29%
+                         # (`codegate scan --alpha 0.05`). See ENGINEERING_LOG section 13.
 delta: 0.05               # confidence: guarantee holds with probability >= 1 - delta
+certificate: cluster      # unit of evidence: each task group counts once, however many
+                          # models answered it. "sample" is the original per-sample test,
+                          # optimistic when samples share a task. See
+                          # docs/cluster-aware-certificate/README.md.
 random_seed: 20260828
 
 cwes:

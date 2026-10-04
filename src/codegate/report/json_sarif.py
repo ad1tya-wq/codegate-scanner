@@ -51,6 +51,8 @@ def _certificate_dict(result: ScanResult) -> dict | None:
         "alpha": calib.alpha,
         "delta": calib.delta,
         "n_vuln_calib": calib.n_vuln_calib,
+        "method": calib.method,
+        "n_vuln_groups": calib.n_vuln_groups,
     }
 
 

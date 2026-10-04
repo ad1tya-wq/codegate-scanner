@@ -188,3 +188,27 @@ def test_separation_metrics_refuse_a_split_filter_without_split_information():
     frame = ranker_score_frame(labeled, scores)
     with pytest.raises(ValueError, match="split"):
         ranker_separation_metrics(frame, split="test")
+
+
+def test_heldout_miss_rate_reports_per_sample_per_group_and_a_cluster_interval():
+    from codegate.research.eval.metrics import heldout_miss_rate
+    frame = pd.DataFrame({
+        "sample_id": list("abcdefgh"),
+        "label":     [1, 1, 1, 1, 1, 0, 0, 1],
+        "score":     [0.9, 0.9, 0.1, 0.1, 0.1, 0.9, 0.9, 0.2],
+        "split":     ["test"] * 7 + ["calib"],
+        "task_group": ["g1", "g1", "g2", "g2", "g3", "g4", "g4", "g5"],
+    })
+    r = heldout_miss_rate(frame, t_hat=0.5, split="test", n_boot=500, seed=0)
+    assert r["n_vulnerable"] == 5 and r["n_groups"] == 3
+    assert r["per_sample"] == pytest.approx(2 / 5)          # a, b approved
+    assert r["per_group"] == pytest.approx((1 + 0 + 0) / 3)  # g1 fully, g2 and g3 not at all
+    assert 0.0 <= r["ci_low"] <= r["per_group"] <= r["ci_high"] <= 1.0
+
+
+def test_ranker_score_frame_carries_task_groups_from_generations():
+    labeled, scores, gens = _frames_with_splits()
+    gens = gens.assign(prompt_id=["CWE-89-001-vulnerable", "CWE-89-001-near_miss",
+                                  "CWE-89-002-vulnerable", "CWE-89-002-neutral", "CWE-89-003-vulnerable"])
+    frame = ranker_score_frame(labeled, scores, generations_df=gens)
+    assert list(frame["task_group"]) == ["CWE-89-001", "CWE-89-001", "CWE-89-002", "CWE-89-002"]

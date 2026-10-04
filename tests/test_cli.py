@@ -51,6 +51,7 @@ def test_info_prints_certificate_table(tmp_path):
     # PROVISIONAL banner is printed live -- that disclosure lives in the
     # PDF report and docs/ENGINEERING_LOG.md instead.
     assert "PROVISIONAL" not in result.output
+    assert "per-sample binomial" in result.output   # the fake certificate's method
 
 
 def test_info_rejects_ranker_id_mismatch(tmp_path):

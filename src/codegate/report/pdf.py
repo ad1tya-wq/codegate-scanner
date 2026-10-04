@@ -268,6 +268,7 @@ def _certificate_flowables(styles, result: ScanResult) -> list:
         ["Certified max miss-rate (alpha)", f"{calib.alpha:.2%}"],
         ["Confidence (1 - delta)", f"{1 - calib.delta:.2%}"],
         ["Calibration vulnerable samples", str(calib.n_vuln_calib)],
+        ["Certificate method", calib.method_description()],
         ["Created", calib.created_at],
     ]
     table = Table(rows, colWidths=[2.4 * inch, 3.6 * inch])
@@ -275,12 +276,16 @@ def _certificate_flowables(styles, result: ScanResult) -> list:
     flow.append(table)
     flow.append(Spacer(1, 6))
     flow.append(Paragraph(
-        f"What this guarantees: for any function scored at or above t_hat, "
-        f"the probability it is actually vulnerable is at most {calib.alpha:.2%}, "
-        f"with {1 - calib.delta:.2%} confidence -- a distribution-free "
-        "certificate (Learn-Then-Test conformal risk control), not a "
-        "heuristic claim. It does not guarantee anything about a function "
-        "scored below t_hat (escalated) beyond \"not certified safe.\"",
+        f"What this guarantees: of vulnerable functions, at most {calib.alpha:.2%} "
+        f"score at or above t_hat and are auto-approved, with {1 - calib.delta:.2%} "
+        "confidence -- a distribution-free certificate (Learn-Then-Test "
+        "conformal risk control), not a heuristic claim. "
+        + ("Each task group in the calibration data counts as one piece of "
+           "evidence, however many models answered it, so correlated answers "
+           "to the same task cannot inflate the certificate. "
+           if calib.method == "cluster-hb" else "")
+        + "It does not guarantee anything about a function scored below "
+        "t_hat (escalated) beyond \"not certified safe.\"",
         styles["Body"],
     ))
     if calib.is_provisional:

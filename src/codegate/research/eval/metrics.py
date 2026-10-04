@@ -1,6 +1,7 @@
 from __future__ import annotations
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from sklearn.metrics import roc_auc_score
 
@@ -101,8 +102,12 @@ def ranker_score_frame(
     merged = labeled_df.merge(scores_df, on="sample_id", how="inner")
     columns = ["sample_id", "cwe", "label", "score"]
     if generations_df is not None:
-        merged = merged.merge(generations_df[["sample_id", "split"]], on="sample_id", how="left")
+        extra = ["split"] + (["prompt_id"] if "prompt_id" in generations_df.columns else [])
+        merged = merged.merge(generations_df[["sample_id", *extra]], on="sample_id", how="left")
         columns.append("split")
+        if "prompt_id" in extra:
+            merged["task_group"] = merged["prompt_id"].str.rsplit("-", n=1).str[0]
+            columns.append("task_group")
     return merged[merged["label"] != LABEL_ABSTAIN][columns]
 
 
@@ -140,6 +145,37 @@ def ranker_separation_metrics(score_frame: pd.DataFrame, *, split: str | None = 
         "roc_auc": float(roc_auc_score(1 - labels, scores)) if len(set(labels)) > 1 else float("nan"),
         "mean_score_vulnerable": float(score_frame.loc[labels == 1, "score"].mean()),
         "mean_score_safe": float(score_frame.loc[labels == 0, "score"].mean()),
+    }
+
+
+def heldout_miss_rate(
+    score_frame: pd.DataFrame, t_hat: float, split: str = "test",
+    n_boot: int = 2000, seed: int = 0,
+) -> dict:
+    """
+    The certificate checked against data it never saw: of the vulnerable
+    samples in `split`, the share scoring >= t_hat (auto-approved).
+
+    Reported two ways. `per_sample` pools every vulnerable sample.
+    `per_group` averages each task group's fraction, which is the quantity
+    the cluster-aware certificate bounds. `ci_low`/`ci_high` are a 95%
+    bootstrap interval for `per_group` that resamples whole task groups:
+    samples within a group are correlated, so resampling samples would
+    understate the uncertainty.
+    """
+    vuln = score_frame[(score_frame["split"] == split) & (score_frame["label"] == 1)]
+    approved = (vuln["score"] >= t_hat).astype(float)
+    by_group = approved.groupby(vuln["task_group"]).mean().to_numpy()
+    rng = np.random.default_rng(seed)
+    boots = [by_group[rng.integers(0, len(by_group), len(by_group))].mean() for _ in range(n_boot)]
+    low, high = np.percentile(boots, [2.5, 97.5])
+    return {
+        "n_vulnerable": int(len(vuln)),
+        "n_groups": int(len(by_group)),
+        "per_sample": float(approved.mean()),
+        "per_group": float(by_group.mean()),
+        "ci_low": float(low),
+        "ci_high": float(high),
     }
 
 

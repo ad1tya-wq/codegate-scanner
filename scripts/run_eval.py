@@ -31,6 +31,7 @@ from codegate.research.artifacts import load_calibration
 from codegate.research.eval.metrics import (
     corpus_label_distribution,
     oracle_accuracy_on_fixtures,
+    heldout_miss_rate,
     ranker_score_frame,
     ranker_separation_metrics,
     scan_ground_truth_eval,
@@ -125,6 +126,17 @@ def main() -> int:
             held = ranker_separation_metrics(score_frame, split="test")
             summary["ranker_separation_heldout"] = held
             print(f"      ROC-AUC (held-out test split -- quote this)  = {held['roc_auc']:.4f}  n={held['n_samples']}")
+            calib_for_check = model_dir / "calibration.json"
+            if "task_group" in score_frame.columns and calib_for_check.exists():
+                shipped = load_calibration(calib_for_check)
+                if shipped.t_hat is not None:
+                    miss = heldout_miss_rate(score_frame, shipped.t_hat, split="test")
+                    summary["heldout_miss_rate"] = {**miss, "alpha": shipped.alpha}
+                    print(f"      held-out miss rate at t_hat (alpha={shipped.alpha}): "
+                          f"{miss['per_group']:.3f} per task group "
+                          f"(95% cluster bootstrap {miss['ci_low']:.3f}-{miss['ci_high']:.3f}), "
+                          f"{miss['per_sample']:.3f} per sample, over {miss['n_vulnerable']} vulnerable "
+                          f"samples in {miss['n_groups']} groups")
         else:
             print(f"      held-out AUC skipped -- {gens_path} not found, so splits are unknown")
     else:

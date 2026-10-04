@@ -54,6 +54,7 @@ def render_terminal(result: ScanResult, target: Path, console: Console, verifier
             "none -- everything escalated" if calib.t_hat is None else f"{calib.t_hat:.4f}",
         )
         cert.add_row("Certified max miss-rate (alpha)", f"{calib.alpha:.2%}")
+        cert.add_row("Certificate method", calib.method_description())
         console.print(cert)
 
     console.print(

@@ -294,9 +294,15 @@ def run_full_pipeline(
     scores_df.to_parquet(out_dir / "scores_r2.parquet")
 
     scored_merged = merged.merge(scores_df[["sample_id", "score"]], on="sample_id")
+    # The task group (prompt id minus its flavor) is the unit the cluster-aware
+    # certificate counts: every model's answer to one task, in any flavor, is
+    # one correlated group, not several independent draws.
+    scored_merged["task_group"] = scored_merged["prompt_id"].str.rsplit("-", n=1).str[0]
     calib_mask = scored_merged["split"] == "calib"
     calib_scores = scored_merged.loc[calib_mask, "score"].to_numpy()
     calib_labels = scored_merged.loc[calib_mask, "label"].to_numpy()
+    calib_groups = (scored_merged.loc[calib_mask, "task_group"].to_numpy()
+                    if cfg.certificate == "cluster" else None)
 
     n_vuln_calib = int((calib_labels == 1).sum())
     summary["n_vuln_calib"] = n_vuln_calib
@@ -308,19 +314,24 @@ def run_full_pipeline(
         # brackets the configured alpha so the frontier shows the trade-off
         # around the operating point actually being certified.
         alphas = sorted({cfg.alpha, 0.05, 0.10, 0.20, 0.30})
-        frontier_df = compute_frontier(calib_scores, calib_labels, alphas=alphas, delta=cfg.delta)
+        frontier_df = compute_frontier(calib_scores, calib_labels, alphas=alphas, delta=cfg.delta,
+                                       groups=calib_groups)
         frontier_df.to_csv(out_dir / "frontier.csv", index=False)
         plot_frontier(frontier_df, str(out_dir / "frontier.png"))
         print(frontier_df.to_string(index=False))
 
         # Persist the threshold-search trace at the configured operating
         # point: it is the evidence behind t_hat, and a reviewer will ask.
-        operating = calibrate_threshold(calib_scores, calib_labels, alpha=cfg.alpha, delta=cfg.delta)
+        operating = calibrate_threshold(calib_scores, calib_labels, alpha=cfg.alpha, delta=cfg.delta,
+                                        groups=calib_groups)
+        print(f"Certificate: {operating.method}"
+              + (f" over {operating.n_vuln_groups} task groups" if operating.n_vuln_groups else ""))
         pd.DataFrame(
             operating.trace, columns=["threshold", "k_vuln_auto_approved", "p_value", "certified"]
         ).to_csv(out_dir / "ltt_trace.csv", index=False)
         summary["t_hat"] = operating.t_hat
         summary["coverage"] = operating.coverage
+        summary["certificate_method"] = operating.method
 
         # Persist the model and its certificate together -- no scanner
         # without this. is_simulated is currently the only signal for
@@ -349,18 +360,30 @@ def run_full_pipeline(
         _write_placeholder_plot(out_dir / "frontier.png", "insufficient vulnerable calibration samples")
         print("WARNING: zero vulnerable calibration samples; frontier.png is a placeholder.")
 
+    # Generator shift: calibrate on the other generators' calibration split and
+    # judge the held-out generator on its samples the ranker never trained on.
+    # Using every split (as this once did) let training samples, which score
+    # optimistically, into both sides of the experiment.
+    calib_rows = scored_merged[calib_mask]
+    unseen_rows = scored_merged[scored_merged["split"] != "train"]
     scores_by_gen: dict[str, np.ndarray] = {}
     labels_by_gen: dict[str, np.ndarray] = {}
-    for gen_name, gen_group in scored_merged.groupby("generator"):
+    groups_by_gen: dict[str, np.ndarray] = {}
+    for gen_name, gen_group in calib_rows.groupby("generator"):
         scores_by_gen[gen_name] = gen_group["score"].to_numpy()
         labels_by_gen[gen_name] = gen_group["label"].to_numpy()
+        groups_by_gen[gen_name] = gen_group["task_group"].to_numpy()
 
     shift_results = []
     if len(scores_by_gen) >= 2 and n_vuln_calib > 0:
         for held_out in scores_by_gen:
+            unseen = unseen_rows[unseen_rows["generator"] == held_out]
             try:
                 r = run_shift_experiment(
-                    scores_by_gen, labels_by_gen, held_out, alpha=cfg.alpha, delta=cfg.delta
+                    scores_by_gen, labels_by_gen, held_out, alpha=cfg.alpha, delta=cfg.delta,
+                    groups_by_generator=groups_by_gen if cfg.certificate == "cluster" else None,
+                    held_out_scores=unseen["score"].to_numpy(),
+                    held_out_labels=unseen["label"].to_numpy(),
                 )
                 shift_results.append(r)
             except ValueError as e:

@@ -53,6 +53,7 @@ def info(
     table.add_row("Certified max miss-rate (alpha)", f"{calib.alpha:.2%}")
     table.add_row("Confidence (1 - delta)", f"{1 - calib.delta:.2%}")
     table.add_row("Calibration vulnerable samples", str(calib.n_vuln_calib))
+    table.add_row("Certificate method", calib.method_description())
     table.add_row("Created", calib.created_at)
     console.print(table)
 

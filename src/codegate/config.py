@@ -18,6 +18,7 @@ class CodeGateConfig:
     prompts_dir: str
     fixtures_dir: str
     runs_dir: str
+    certificate: str = "cluster"   # "cluster" (task group = unit of evidence) or "sample"
 
 
 def load_config(path: str = "config.yaml") -> CodeGateConfig:
@@ -38,6 +39,14 @@ def load_config(path: str = "config.yaml") -> CodeGateConfig:
     # alpha/delta defect (decision #3) went unnoticed, so it is gone rather
     # than left as documentation of an intention.
 
+    # The certificate's unit of evidence. "cluster" treats each task group as
+    # one draw, which stays valid when several models answer the same task;
+    # "sample" is the original per-sample binomial test, optimistic under that
+    # correlation (docs/cluster-aware-certificate/README.md).
+    certificate = raw.get("certificate", "cluster")
+    if certificate not in ("cluster", "sample"):
+        raise ValueError(f"certificate must be 'cluster' or 'sample', got {certificate!r}")
+
     paths = raw["paths"]
     return CodeGateConfig(
         alpha=raw["alpha"],
@@ -52,4 +61,5 @@ def load_config(path: str = "config.yaml") -> CodeGateConfig:
         prompts_dir=paths["prompts_dir"],
         fixtures_dir=paths["fixtures_dir"],
         runs_dir=paths["runs_dir"],
+        certificate=certificate,
     )

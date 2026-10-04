@@ -60,3 +60,30 @@ def test_run_shift_experiment_detects_certificate_break_under_severe_shift():
     result = run_shift_experiment(scores_by_gen, labels_by_gen, held_out="d", alpha=0.05, delta=0.05)
     assert result.certificate_held is False
     assert result.realized_risk_on_held_out > 0.05
+
+
+def test_compute_frontier_records_the_grouped_method_when_given_groups():
+    scores, labels = _separable(400, seed=4)
+    groups = np.array([f"g{i // 2}" for i in range(400)])   # pairs share a group
+    df = compute_frontier(scores, labels, alphas=[0.1, 0.2], delta=0.05, groups=groups)
+    assert list(df["n_vuln_groups"]) == [100, 100]
+
+
+def test_shift_experiment_calibrates_with_groups_and_judges_separate_held_out_data():
+    rng = np.random.default_rng(5)
+    scores_by_gen, labels_by_gen, groups_by_gen = {}, {}, {}
+    for gen in ["a", "b", "c", "d"]:
+        n = 300
+        labels = np.array([0] * (n // 2) + [1] * (n // 2))
+        scores_by_gen[gen] = np.where(labels == 0, rng.beta(6, 2, n), rng.beta(2, 6, n))
+        labels_by_gen[gen] = labels
+        groups_by_gen[gen] = np.array([f"task{i % 150}" for i in range(n)])  # shared across generators
+    # The held-out generator is judged on data passed separately (in the
+    # pipeline: its samples the ranker never trained on), here rigged so
+    # every vulnerable sample would be approved.
+    held_scores = np.array([0.99, 0.99, 0.01])
+    held_labels = np.array([1, 1, 0])
+    r = run_shift_experiment(scores_by_gen, labels_by_gen, held_out="d", alpha=0.10, delta=0.05,
+                             groups_by_generator=groups_by_gen,
+                             held_out_scores=held_scores, held_out_labels=held_labels)
+    assert r.realized_risk_on_held_out == 1.0 and r.certificate_held is False

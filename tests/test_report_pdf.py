@@ -119,3 +119,19 @@ def test_generate_pdf_creates_missing_parent_directories(tmp_path):
     out = tmp_path / "nested" / "dir" / "report.pdf"
     generate_pdf(_result(findings=[]), target=Path("app"), output_path=out)
     assert out.exists()
+
+
+def test_certificate_section_names_the_method_and_states_the_right_guarantee():
+    from codegate.report.pdf import _certificate_flowables
+    calib = Calibration(
+        t_hat=0.83, alpha=0.10, delta=0.05, n_vuln_calib=206, ranker_id="R2",
+        corpus_version="real-2040-sym", is_provisional=False, created_at="2026-10-04T00:00:00+00:00",
+        method="cluster-hb", n_vuln_groups=66,
+    )
+    flow = _certificate_flowables(_styles(), _result(calibration=calib))
+    text = " ".join(str(getattr(f, "text", "")) for f in flow)
+    cells = " ".join(str(c) for f in flow if hasattr(f, "_cellvalues") for row in f._cellvalues for c in row)
+    assert "66 task groups" in cells
+    # The bound is on vulnerable code being approved, not on approved code being vulnerable.
+    assert "of vulnerable functions" in text
+    assert "probability it is actually vulnerable" not in text

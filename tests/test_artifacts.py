@@ -73,6 +73,7 @@ def test_calibration_file_is_readable_json_with_expected_keys(tmp_path):
         "t_hat", "alpha", "delta", "n_vuln_calib", "ranker_id",
         "corpus_version", "is_provisional", "created_at",
         "frontier",   # added 2026-10-04 for scan-time --alpha
+        "method", "n_vuln_groups",   # added 2026-10-04 with the cluster-aware certificate
     }
     assert raw["is_provisional"] is False
 
@@ -165,3 +166,22 @@ def test_a_calibration_written_before_frontiers_still_loads(tmp_path):
     assert calib.at_alpha(0.05).t_hat == 0.66
     with pytest.raises(UncertifiedAlphaError):
         calib.at_alpha(0.10)
+
+
+def test_calibration_records_the_certificate_method_and_group_count(tmp_path):
+    path = tmp_path / "calibration.json"
+    grouped = LTTResult(t_hat=0.8, alpha=0.10, delta=0.05, n_vuln_calib=206, coverage=0.49,
+                        trace=[], method="cluster-hb", n_vuln_groups=66)
+    save_calibration(grouped, path, corpus_version="real-2040-sym", is_provisional=False)
+    calib = load_calibration(path)
+    assert calib.method == "cluster-hb" and calib.n_vuln_groups == 66
+
+
+def test_a_calibration_written_before_methods_reads_as_sample_binomial(tmp_path):
+    path = tmp_path / "calibration.json"
+    path.write_text(
+        '{"t_hat": 0.66, "alpha": 0.05, "delta": 0.05, "n_vuln_calib": 60, "ranker_id": "R2", '
+        '"corpus_version": "simulated-v2", "is_provisional": true, "created_at": "2026-09-01"}'
+    )
+    calib = load_calibration(path)
+    assert calib.method == "sample-binomial" and calib.n_vuln_groups is None

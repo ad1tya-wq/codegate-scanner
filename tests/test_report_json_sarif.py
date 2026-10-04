@@ -86,3 +86,15 @@ def test_to_sarif_rules_cover_every_tracked_cwe_plus_unspecified():
     payload = json.loads(to_sarif(_result(), Path("app")))
     rule_ids = {r["id"] for r in payload["runs"][0]["tool"]["driver"]["rules"]}
     assert rule_ids == {"CWE-89", "CWE-78", "CWE-798", "UNSPECIFIED"}
+
+
+def test_to_json_certificate_names_its_method():
+    calib = Calibration(
+        t_hat=0.83, alpha=0.10, delta=0.05, n_vuln_calib=206, ranker_id="R2",
+        corpus_version="real-2040-sym", is_provisional=False, created_at="2026-10-04T00:00:00+00:00",
+        method="cluster-hb", n_vuln_groups=66,
+    )
+    r = _result()
+    r = ScanResult(**{**r.__dict__, "calibration": calib})
+    cert = json.loads(to_json(r, Path("target")))["certificate"]
+    assert cert["method"] == "cluster-hb" and cert["n_vuln_groups"] == 66
