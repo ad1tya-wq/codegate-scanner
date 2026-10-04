@@ -92,3 +92,38 @@ def test_harvest_is_bounded_and_safe_on_unparseable_code():
     assert harvest_allowlist_values("def f(:\n") == []
     many = "ALLOWED = (" + ", ".join(f'"v{i}"' for i in range(100)) + ")\n"
     assert len(harvest_allowlist_values(many)) <= 12
+
+
+def test_stub_finder_never_fakes_a_standard_library_module():
+    """
+    Stdlib modules probe for platform-only modules: subprocess decides it is
+    on Windows with `try: import msvcrt`. When the stub finder answered for
+    any absent name, Linux got a fake msvcrt, subprocess took its Windows
+    path, and every CWE-78 detonation abstained (caught by CI on Linux,
+    2026-10-04). Only third-party drivers may be stubbed.
+    """
+    import subprocess
+    import sys
+    from codegate.oracles.invocation import HARNESS_PRELUDE
+    probe = HARNESS_PRELUDE + (
+        "\nimport importlib, sys\n"
+        "absent = [n for n in ('msvcrt', '_winapi', 'winreg', 'fcntl', 'grp', '_posixsubprocess')]\n"
+        "faked = []\n"
+        "for n in absent:\n"
+        "    try:\n"
+        "        m = importlib.import_module(n)\n"
+        "    except ImportError:\n"
+        "        continue\n"
+        "    if getattr(m, '__file__', None) is None and not hasattr(m, '__spec__') or "
+        "type(m.__spec__.loader).__name__ == '_StubLoader':\n"
+        "        faked.append(n)\n"
+        "print('FAKED', faked)\n"
+        "import subprocess\n"
+        "print('SPAWN', subprocess.run([sys.executable, '-c', 'print(7)'], capture_output=True, text=True).stdout.strip())\n"
+        "import psycopg2_not_real_cg\n"
+        "print('THIRD_PARTY_STUBBED', type(psycopg2_not_real_cg.__spec__.loader).__name__)\n"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60)
+    assert "FAKED []" in out.stdout, out.stdout + out.stderr
+    assert "SPAWN 7" in out.stdout, out.stdout + out.stderr
+    assert "THIRD_PARTY_STUBBED _StubLoader" in out.stdout, out.stdout + out.stderr

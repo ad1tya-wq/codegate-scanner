@@ -172,9 +172,10 @@ def guarded_exec_source(code: str) -> str:
 # Modules that must NEVER be stubbed out, whatever happens. Stubbing any of
 # these would make the oracle observe a fake sink and report SAFE for code
 # that is in fact injectable -- a silent false-safe, the worst failure this
-# labeller can produce. They are all stdlib and therefore always importable,
-# so the guard should be unreachable; it exists because the cost of being
-# wrong here is a corrupted corpus rather than a crash.
+# labeller can produce. They are all stdlib, and the finder also refuses
+# every name in sys.stdlib_module_names, so this list is a second guard; it
+# exists because the cost of being wrong here is a corrupted corpus rather
+# than a crash.
 NEVER_STUB = (
     "subprocess", "os", "sys", "sqlite3", "shlex", "shutil", "pathlib",
     "builtins", "importlib", "io", "tempfile",
@@ -236,7 +237,14 @@ def _install_missing_module_stubs():
 
     class _StubFinder:
         def find_spec(self, fullname, path=None, target=None):
-            if fullname.split(".")[0] in NEVER_STUB:
+            # Never answer for a standard-library name, including the ones
+            # absent on this platform: stdlib probes for them on purpose.
+            # subprocess decides it is on Windows with `try: import msvcrt`,
+            # so a fake msvcrt on Linux sent it down its Windows code path
+            # and every CWE-78 detonation abstained. Stubs exist only for
+            # missing third-party drivers.
+            top = fullname.split(".")[0]
+            if top in NEVER_STUB or top in sys.stdlib_module_names:
                 return None
             return ModuleSpec(fullname, _StubLoader())
 
