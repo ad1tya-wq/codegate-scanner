@@ -110,3 +110,53 @@ def test_failed_sample_is_retried_on_resume(tmp_path):
     df = run_generation(_prompts(4), {"flaky": healthy}, 1, is_simulated=True, checkpoint_path=ckpt)
     assert healthy.calls == 1, "only the previously-failed sample should be retried"
     assert len(df) == 4
+
+
+# The full 2,160 run was written into a directory still holding the
+# September checkpoint. Resume matched on sample_id alone -- a hash of
+# prompt_id and generator -- so 404 September answers were reused: 78 of
+# them answering CWE-798 prompts that had since been rewritten, and 189
+# carrying a split that had since been reassigned. These pin the fix.
+
+def _reworded(prompts: list[Prompt]) -> list[Prompt]:
+    return [Prompt(p.prompt_id, p.cwe, p.flavor, p.split, p.task + " Reworded.") for p in prompts]
+
+
+def _resplit(prompts: list[Prompt], split: str) -> list[Prompt]:
+    return [Prompt(p.prompt_id, p.cwe, p.flavor, split, p.task) for p in prompts]
+
+
+def test_resume_regenerates_a_sample_whose_prompt_text_changed(tmp_path):
+    ckpt = tmp_path / "ckpt.jsonl"
+    run_generation(_prompts(2), {"counter": CountingBackend()}, 1, is_simulated=True, checkpoint_path=ckpt)
+
+    second = CountingBackend()
+    run_generation(_reworded(_prompts(2)), {"counter": second}, 1, is_simulated=True, checkpoint_path=ckpt)
+    assert second.calls == 2, "an answer to the old wording was reused for the new prompt"
+
+
+def test_resume_reuses_the_code_but_takes_the_split_from_the_current_prompt(tmp_path):
+    ckpt = tmp_path / "ckpt.jsonl"
+    run_generation(_prompts(2), {"counter": CountingBackend()}, 1, is_simulated=True, checkpoint_path=ckpt)
+
+    second = CountingBackend()
+    df = run_generation(_resplit(_prompts(2), "calib"), {"counter": second}, 1,
+                        is_simulated=True, checkpoint_path=ckpt)
+    assert second.calls == 0, "same prompt text -- the code is still a valid answer"
+    assert set(df["split"]) == {"calib"}, "a stale split leaked through from the checkpoint"
+
+
+def test_resume_regenerates_a_legacy_record_that_cannot_be_verified(tmp_path):
+    ckpt = tmp_path / "ckpt.jsonl"
+    p = _prompts(1)[0]
+    legacy = {"sample_id": run_generation([p], {"counter": CountingBackend()}, 1,
+                                          is_simulated=True)["sample_id"][0],
+              "prompt_id": p.prompt_id, "cwe": p.cwe, "flavor": p.flavor,
+              "generator": "counter", "code": "def old(): pass\n",
+              "split": p.split, "is_simulated": True}
+    ckpt.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+
+    second = CountingBackend()
+    df = run_generation([p], {"counter": second}, 1, is_simulated=True, checkpoint_path=ckpt)
+    assert second.calls == 1
+    assert df["code"][0] != "def old(): pass\n"

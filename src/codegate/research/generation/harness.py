@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -24,6 +25,15 @@ def _sample_id(prompt_id: str, generator_name: str, k: int) -> str:
     would make every resumed run regenerate everything.
     """
     return f"{stable_seed(prompt_id, generator_name, k):08x}-{k}"
+
+
+def prompt_fingerprint(prompt: Prompt) -> str:
+    """
+    Identifies the exact wording a sample answered. Stored with every
+    checkpoint record so resume can tell a still-valid answer from an
+    answer to a prompt that has since been rewritten.
+    """
+    return hashlib.sha256(prompt.task.encode("utf-8")).hexdigest()[:16]
 
 
 def _load_checkpoint(checkpoint_path: Path) -> dict[str, dict]:
@@ -58,7 +68,10 @@ def run_generation(
 
     When `checkpoint_path` is given, each successful sample is appended to a
     JSONL file as soon as it is produced, and samples already present there
-    are not regenerated. This makes a multi-hour Ollama run survive a dropped
+    are not regenerated -- provided the prompt wording they answered still
+    matches (see `prompt_fingerprint`). Matching on sample_id alone once
+    reused 404 answers from an older run in the same directory, 78 of them
+    to prompts that had since been rewritten. This makes a multi-hour Ollama run survive a dropped
     LAN connection, a closed lid, or a Ctrl-C: rerun the same command and it
     picks up where it stopped.
 
@@ -77,6 +90,7 @@ def run_generation(
 
     records: list[dict] = []
     failures = 0
+    stale = 0
     total = len(prompts) * len(backends) * samples_per_prompt
     processed = 0
 
@@ -86,9 +100,18 @@ def run_generation(
                 processed += 1
                 sample_id = _sample_id(prompt.prompt_id, generator_name, k)
 
-                if sample_id in done:
-                    records.append(done[sample_id])
-                    continue
+                prior = done.get(sample_id)
+                if prior is not None:
+                    if prior.get("prompt_fingerprint") == prompt_fingerprint(prompt):
+                        # Same wording, so the code is still a valid answer.
+                        # The split belongs to the prompt, not the answer --
+                        # always take the current one.
+                        records.append({**prior, "split": prompt.split})
+                        continue
+                    # Reworded since, or a legacy record with no fingerprint
+                    # to check: regenerate rather than reuse an answer to a
+                    # question that may no longer be the one being asked.
+                    stale += 1
 
                 try:
                     code = backend.generate(
@@ -118,11 +141,17 @@ def run_generation(
 
                 if ckpt is not None:
                     with ckpt.open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps(record) + "\n")
+                        fh.write(json.dumps({**record, "prompt_fingerprint": prompt_fingerprint(prompt)}) + "\n")
 
                 if on_progress is not None:
                     on_progress(processed, total, record)
 
+    if stale:
+        print(
+            f"[resume] {stale} checkpointed sample(s) answered a different "
+            f"prompt wording (or predate fingerprints) and were regenerated.",
+            flush=True,
+        )
     if failures:
         print(
             f"[warn] {failures} generation(s) failed and were skipped. "
