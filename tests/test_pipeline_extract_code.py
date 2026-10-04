@@ -7,6 +7,8 @@ being handed raw "Certainly! Here's the function:\n```python\ndef f():
 the prose, and the function-name candidates fell back to
 SimulatedBackend's four template names that real models never use.
 """
+import ast
+
 from codegate.research.pipeline import extract_code
 
 
@@ -131,3 +133,36 @@ def test_extract_code_skips_a_fence_with_only_an_import_no_def():
     )
     result = extract_code(raw)
     assert "def ping_host(host):" in result
+
+
+# Two codellama shapes from the pilot corpus that fell through to `raw`,
+# failed to parse, and abstained (docs/PILOT_REVIEW.md section 5.4).
+
+def test_extract_code_takes_indented_code_before_an_unopened_closing_fence():
+    raw = (  # 79a71158-0
+        "  def is_prime(n):\n    if n < 2:\n      return False\n    return True\n"
+        "```\nThis function uses a simple loop. For example:\n"
+        "```\nis_prime(7)\n```\n"
+    )
+    code = extract_code(raw)
+    ast.parse(code)
+    assert code.startswith("def is_prime(n):")
+
+
+def test_extract_code_unwraps_an_html_details_block():
+    raw = (  # 71891e94-0
+        "<details> <summary><b>Answer</b></summary> <br>\n\n"
+        "def merge_dicts(d1, d2):\n    return {**d1, **d2}\n\n</details>\n\n"
+        "This function uses the ** operator.\n```\nmerge_dicts({}, {})\n```\n"
+    )
+    code = extract_code(raw)
+    ast.parse(code)
+    assert "def merge_dicts" in code and "<" not in code
+
+
+def test_extract_code_leaves_a_details_block_with_no_def_to_abstain():
+    raw = (  # ec4e60fe-0 -- genuinely broken: no `def`, no colon
+        "<details>\n  <summary>Solution</summary>\n\n"
+        "  celsius_to_fahrenheit(c)\n  return (c * 9/5) + 32\n\n</details>\n"
+    )
+    assert extract_code(raw) == raw

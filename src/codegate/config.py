@@ -12,7 +12,6 @@ class CodeGateConfig:
     cwes: list[str]
     flavors: list[str]
     generators: list[str]
-    adjudicator: str
     verifier: str
     samples_per_prompt: int
     prompts_per_cwe: int
@@ -27,11 +26,10 @@ def load_config(path: str = "config.yaml") -> CodeGateConfig:
         raise FileNotFoundError(f"Config file not found: {path}")
     raw = yaml.safe_load(p.read_text())
 
-    if raw["adjudicator"] in raw["generators"]:
-        raise ValueError(
-            f"role-reuse violation: adjudicator '{raw['adjudicator']}' "
-            f"also appears in generators {raw['generators']}"
-        )
+    # An `adjudicator` key used to be required here and checked against the
+    # generator list. Nothing ever called the adjudicator -- its verdict was
+    # hard-coded False -- so the key is now ignored if present, like
+    # `split_ratios` below.
 
     # There was a `split_ratios` key here, parsed and validated to sum to
     # 1.0, and read by nothing. Splits are assigned per task group by the
@@ -48,7 +46,6 @@ def load_config(path: str = "config.yaml") -> CodeGateConfig:
         cwes=list(raw["cwes"]),
         flavors=list(raw["flavors"]),
         generators=list(raw["generators"]),
-        adjudicator=raw["adjudicator"],
         verifier=raw["verifier"],
         samples_per_prompt=raw["samples_per_prompt"],
         prompts_per_cwe=raw["prompts_per_cwe"],

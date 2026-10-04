@@ -3,7 +3,7 @@ import re
 
 from codegate.oracles.ast_utils import function_exists
 from codegate.oracles.dbapi_recorder import RECORDER_SOURCE
-from codegate.oracles.invocation import HARNESS_PRELUDE
+from codegate.oracles.invocation import HARNESS_PRELUDE, benign_candidates, guarded_exec_source
 from codegate.oracles.sandbox import run_sandboxed
 
 # The fixture creates every table name a model plausibly picks for these
@@ -56,6 +56,7 @@ _FUTURE_IMPORT = re.compile(r"^from __future__ import .*$", re.MULTILINE)
 _HARNESS_TEMPLATE = '''
 _TABLES = {tables!r}
 _PAYLOAD = {payload!r}
+_ALLOWLIST = {allowlist!r}
 
 
 def _fresh_real_conn():
@@ -95,8 +96,11 @@ if _free:
     # and would abstain despite being exactly the safe shape the corpus
     # needs labelled.
     _benign = [benign_value_for(p.name) for p in _free]
-    if _invoke(_benign).observed:
-        _observed = True
+    for _vec in benign_vectors(_free, _ALLOWLIST):
+        if _invoke(_vec).observed:
+            _observed = True
+            _benign = _vec
+            break
 
     for _i in range(len(_free)):
         _args = list(_benign)
@@ -150,13 +154,14 @@ def _build_source(code: str, function_name: str) -> str:
         "import sqlite3\n"
         + _FUTURE_IMPORT.sub("", RECORDER_SOURCE) + "\n"
         + HARNESS_PRELUDE + "\n"
-        + _FUTURE_IMPORT.sub("", code) + "\n"
+        + guarded_exec_source(code) + "\n"
         + _HARNESS_TEMPLATE.format(
             tables=_FIXTURE_TABLES,
             columns=_FIXTURE_COLUMNS,
             row1=_FIXTURE_ROW_1,
             row2=_FIXTURE_ROW_2,
             payload=_PAYLOAD,
+            allowlist=benign_candidates(code),
             function_name=function_name,
         )
     )

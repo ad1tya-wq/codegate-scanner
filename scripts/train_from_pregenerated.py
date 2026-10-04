@@ -29,7 +29,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("generations_path", help="Path to a generations.parquet from a real run")
     parser.add_argument("--config", default="config.yaml")
-    parser.add_argument("--out-dir", default="data/model")
+    # Required, with no default: it used to default to data/model/, the
+    # shipped artifacts, so an exploratory run overwrote them silently
+    # (docs/ENGINEERING_LOG.md section 11). Promotion is a deliberate copy.
+    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--corpus-version", required=True,
+                        help="name stamped into calibration.json, e.g. real-2040-sym")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -45,8 +50,8 @@ def main() -> int:
     summary = run_full_pipeline(
         cfg, prompts=[], backends=backends,
         is_simulated=False, out_dir=Path(args.out_dir),
-        use_semgrep_and_adjudicator=True,
         pregenerated_df=gen_df,
+        corpus_version=args.corpus_version,
     )
     print()
     print("Summary:", summary)

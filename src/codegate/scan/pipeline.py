@@ -113,7 +113,7 @@ def _semgrep_findings(target: Path, units: list[Unit]) -> list[Finding]:
 
 
 def _rank_and_gate(
-    units: list[Unit], model_dir: Path
+    units: list[Unit], model_dir: Path, alpha: float | None = None
 ) -> tuple[list[tuple[Unit, float]], int, int, Calibration | None]:
     """
     Scores every unit with the loaded ranker and applies the certified
@@ -134,6 +134,8 @@ def _rank_and_gate(
         return [], 0, 0, None
 
     ranker, calib = load_artifacts(model_dir / "model.joblib", model_dir / "calibration.json")
+    if alpha is not None:
+        calib = calib.at_alpha(alpha)   # raises UncertifiedAlphaError, never interpolates
 
     sample_ids = [f"{u.file}:{u.lineno}:{u.func_name}" for u in units]
     df = pd.DataFrame({"sample_id": sample_ids, "code": [u.source for u in units]})
@@ -248,6 +250,7 @@ def run_scan(
     model_dir: Path = DEFAULT_MODEL_DIR,
     verifier: VerifierBackend | None = None,
     cache_dir: Path = DEFAULT_CACHE_DIR,
+    alpha: float | None = None,
 ) -> ScanResult:
     """
     ingest -> static (one semgrep invocation over the whole target) ->
@@ -265,13 +268,17 @@ def run_scan(
     GROQ_API_KEY produce, see scan/verifier.py::build_verifier_backend)
     skips LLM verification entirely: escalated units are reported as
     "needs review" and every n_verified_* count on the result stays 0.
+
+    `alpha` gates with that alpha's own certified threshold instead of the
+    calibration's operating point (see Calibration.at_alpha), and the
+    reports state the alpha the scan actually ran under.
     """
     path = Path(path)
     ingest_result = ingest_path(path)
     units = ingest_result.units
 
     semgrep_findings = _semgrep_findings(path, units)
-    escalated, n_auto, tokens_auto_approved, calib = _rank_and_gate(units, model_dir)
+    escalated, n_auto, tokens_auto_approved, calib = _rank_and_gate(units, model_dir, alpha)
     tally = _resolve_escalated(escalated, verifier, cache_dir)
 
     findings = sorted(semgrep_findings + tally.findings, key=lambda f: (str(f.file), f.line))

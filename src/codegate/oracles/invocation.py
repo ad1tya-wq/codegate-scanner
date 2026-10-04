@@ -16,6 +16,9 @@ templates to prepend rather than being importable from inside the sandbox.
 """
 from __future__ import annotations
 
+import ast
+import re
+
 # Parameter-name heuristics. Deliberately biased toward the numeric side:
 # passing 1 where a string was wanted usually still executes, while passing
 # "alice" where an int was wanted often raises before any sink is reached.
@@ -58,6 +61,112 @@ def benign_value_for(param_name: str) -> str | int:
 def takes_connection(param_names: list[str]) -> bool:
     """Whether the first parameter looks like a database connection."""
     return bool(param_names) and param_names[0].lower() in CONNECTION_PARAM_NAMES
+
+
+_ALLOWLIST_VALUE = re.compile(r"^[A-Za-z0-9_.\-]{1,32}$")
+_MAX_ALLOWLIST_VALUES = 12
+
+
+def harvest_allowlist_values(code: str) -> list[str]:
+    """
+    Short identifier-like strings from the code's set/list/tuple literals and
+    dict keys -- where allowlists live -- for the harness to try as benign
+    arguments when its name-based guess is rejected.
+
+    Without this, code that validates against an allowlist rejects "alice"
+    on every call, never reaches its sink, and abstains: all four generators
+    on two of the six dynamic near-miss groups in the pilot, and 19 of 120
+    dynamic near-miss groups in the full bank use the pattern. It also hid
+    injection *beside* an allowlisted parameter, since the payload runs
+    inherited the same rejected filler. See docs/PILOT_REVIEW.md section 5.3.
+
+    Static and harvested in this process: the values are embedded into the
+    harness as a literal, so nothing here runs the generated code.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+            elts = node.elts
+        elif isinstance(node, ast.Dict):
+            elts = [k for k in node.keys if k is not None]
+        else:
+            continue
+        for e in elts:
+            if (isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    and _ALLOWLIST_VALUE.match(e.value) and e.value not in found):
+                found.append(e.value)
+                if len(found) >= _MAX_ALLOWLIST_VALUES:
+                    return found
+    return found
+
+
+_AFFIX = re.compile(r"^[A-Za-z0-9_.:/\-]{1,16}$")
+
+
+def harvest_affixes(code: str) -> tuple[list[str], list[str]]:
+    """
+    (prefixes, suffixes) the code checks with `.startswith(...)` /
+    `.endswith(...)` -- `path.endswith(".zip")`, `url.startswith("https://")`.
+
+    A suffix check rejects both the benign filler and the payload, so the
+    function abstained on 37 CWE-78 near-miss samples in the full corpus,
+    and injection *behind* such a check was undetectable. The harness uses
+    these to build benign values ("alice.zip") and affix-carrying payloads.
+    Static, like `harvest_allowlist_values`.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return [], []
+    prefixes: list[str] = []
+    suffixes: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("startswith", "endswith") and node.args):
+            continue
+        arg = node.args[0]
+        elts = arg.elts if isinstance(arg, ast.Tuple) else [arg]
+        bucket = prefixes if node.func.attr == "startswith" else suffixes
+        for e in elts:
+            if (isinstance(e, ast.Constant) and isinstance(e.value, str)
+                    and _AFFIX.match(e.value) and e.value not in bucket
+                    and len(bucket) < _MAX_ALLOWLIST_VALUES):
+                bucket.append(e.value)
+    return prefixes, suffixes
+
+
+def benign_candidates(code: str) -> list:
+    """Values the harness tries, one position at a time, when its name-based
+    guess never reaches a sink."""
+    prefixes, suffixes = harvest_affixes(code)
+    affixed = [p + "alice" for p in prefixes] + ["alice" + s for s in suffixes]
+    return harvest_allowlist_values(code) + affixed
+
+
+def guarded_exec_source(code: str) -> str:
+    """
+    Source that runs the generated code inside a guard, so a crash in its
+    module-level example usage cannot take the harness down with it.
+
+    Models often leave a demo call at the bottom -- `scan_host("example.org",
+    80)`. Inlined, an exception there (missing binary, missing file) killed
+    the script before the harness ran, printing nothing, and the sample
+    abstained. The function is defined before that line executes, so after
+    the guard it is still in globals and can be judged.
+    """
+    return (
+        f"_CODEGATE_GENERATED = {code!r}\n"
+        "try:\n"
+        "    exec(compile(_CODEGATE_GENERATED, '<generated>', 'exec'), globals())\n"
+        "except KeyboardInterrupt:\n"
+        "    raise\n"
+        "except BaseException:\n"
+        "    pass\n"
+    )
 
 
 # Modules that must NEVER be stubbed out, whatever happens. Stubbing any of
@@ -168,4 +277,23 @@ def positional_params(fn):
 
 def takes_connection(param_names):
     return bool(param_names) and param_names[0].lower() in CONNECTION_PARAM_NAMES
+
+
+def benign_vectors(params, allowlist_values):
+    # The name-based guess first; then, one position at a time, each value
+    # harvested from the code's own allowlists. Vulnerable code reaches its
+    # sink on the first vector, so this only costs anything for code that
+    # validates its input.
+    # The generic alternates come last and flip the guessed type: a
+    # `column` parameter gets "name" (right for SQL identifiers), and code
+    # that does int(column) rejects it.
+    base = [benign_value_for(p.name) for p in params]
+    yield base
+    for pool in (list(allowlist_values), [1, "alice"]):
+        for i in range(len(params)):
+            for v in pool:
+                if v != base[i]:
+                    vec = list(base)
+                    vec[i] = v
+                    yield vec
 """

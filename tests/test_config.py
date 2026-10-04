@@ -14,23 +14,26 @@ def test_load_config_values():
     assert cfg.delta == 0.05
     assert "CWE-89" in cfg.cwes
     assert len(cfg.generators) == 4
-    assert cfg.adjudicator not in cfg.generators  # role-reuse guard
 
 def test_load_config_missing_file_raises():
     with pytest.raises(FileNotFoundError):
         load_config("does_not_exist.yaml")
 
-def test_role_reuse_guard_raises_when_violated(tmp_path):
-    bad = tmp_path / "bad_config.yaml"
-    bad.write_text(
+def test_load_config_ignores_a_leftover_adjudicator_key(tmp_path):
+    """
+    The adjudicator was declared and validated but never called. The field
+    is gone; an old config file carrying it must still load.
+    """
+    cfg_path = tmp_path / "legacy_config.yaml"
+    cfg_path.write_text(
         "alpha: 0.05\ndelta: 0.05\nrandom_seed: 1\n"
         "cwes: [CWE-89]\nflavors: [vulnerable]\n"
         "generators: [model-a]\nadjudicator: model-a\nverifier: model-b\n"
         "samples_per_prompt: 1\nprompts_per_cwe: 1\n"
         "paths: {prompts_dir: x, fixtures_dir: y, runs_dir: z}\n"
     )
-    with pytest.raises(ValueError, match="role"):
-        load_config(str(bad))
+    cfg = load_config(str(cfg_path))
+    assert not hasattr(cfg, "adjudicator")
 
 
 def test_load_config_ignores_a_leftover_split_ratios_key(tmp_path):

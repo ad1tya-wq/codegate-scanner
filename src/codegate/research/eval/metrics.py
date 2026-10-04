@@ -79,19 +79,34 @@ def corpus_label_distribution(labeled_df: pd.DataFrame) -> pd.DataFrame:
     return df.groupby(["cwe", "outcome"]).size().reset_index(name="count")
 
 
-def ranker_score_frame(labeled_df: pd.DataFrame, scores_df: pd.DataFrame) -> pd.DataFrame:
+def ranker_score_frame(
+    labeled_df: pd.DataFrame,
+    scores_df: pd.DataFrame,
+    generations_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """
     Joins a labeled corpus with a ranker's per-sample scores on
     `sample_id`, dropping abstentions (they were excluded from training
     and calibration upstream, so they shouldn't count as "safe" here
     either). Input shape matches `data/model/labeled.parquet` +
-    `data/model/scores_r2.parquet` today; identical after Track A.
+    `data/model/scores_r2.parquet`.
+
+    Given `generations_df` (the `generations.parquet` written beside them),
+    each row also carries its `split`, which is what lets
+    `ranker_separation_metrics` report a held-out figure. The split is
+    joined here rather than written into `scores_r2.parquet` so the `scores`
+    schema stays the ranker's own contract, and so artifacts written before
+    this change can still be evaluated held-out.
     """
     merged = labeled_df.merge(scores_df, on="sample_id", how="inner")
-    return merged[merged["label"] != LABEL_ABSTAIN][["sample_id", "cwe", "label", "score"]]
+    columns = ["sample_id", "cwe", "label", "score"]
+    if generations_df is not None:
+        merged = merged.merge(generations_df[["sample_id", "split"]], on="sample_id", how="left")
+        columns.append("split")
+    return merged[merged["label"] != LABEL_ABSTAIN][columns]
 
 
-def ranker_separation_metrics(score_frame: pd.DataFrame) -> dict:
+def ranker_separation_metrics(score_frame: pd.DataFrame, *, split: str | None = None) -> dict:
     """
     How well the ranker's score separates vulnerable from safe code,
     independent of any particular threshold: ROC-AUC (0.5 = no better
@@ -101,19 +116,21 @@ def ranker_separation_metrics(score_frame: pd.DataFrame) -> dict:
     AUC alone can't give (e.g. two classes could have equal means and
     opposite variance and still show AUC > 0.5).
 
-    CAUTION: whatever `score_frame` is built from determines whether this
-    is a real generalization metric or an optimistic one. Fed
-    `data/model/labeled.parquet` + `scores_r2.parquet` directly (as
-    scripts/run_eval.py does today), it scores the ranker against
-    samples that include ones it was trained on -- there is no `split`
-    column threaded through those files yet to filter to test-only. On
-    the current small, templated simulated corpus (~108 unique
-    underlying strings) this reads as a suspiciously perfect AUC=1.0,
-    which is a memorization signal, not a generalization one. Don't
-    quote this number as "the ranker's accuracy" without that caveat
-    attached. A held-out-only version is listed as a follow-up in
-    docs/ENGINEERING_LOG.md.
+    Pass `split="test"` for the figure to quote: the ranker never saw the
+    test split, in training or in calibration. Without a split filter the
+    frame includes the training samples, so the result is a memorization
+    figure -- on the templated simulated corpus it read as a perfect 1.0.
+    It is kept only for comparison. Filtering needs a frame built with
+    `generations_df`; asking for a split without one raises rather than
+    silently returning the full-corpus number under a held-out name.
     """
+    if split is not None:
+        if "split" not in score_frame.columns:
+            raise ValueError(
+                "ranker_separation_metrics: split filter requested but the frame has no "
+                "'split' column -- build it with ranker_score_frame(..., generations_df=...)"
+            )
+        score_frame = score_frame[score_frame["split"] == split]
     labels = score_frame["label"].to_numpy()
     scores = score_frame["score"].to_numpy()
     return {

@@ -13,7 +13,8 @@ import pandas as pd
 runner = CliRunner()
 
 
-def _write_fake_artifacts(model_dir: Path, is_provisional: bool = True, ranker_id: str = "R2") -> None:
+def _write_fake_artifacts(model_dir: Path, is_provisional: bool = True, ranker_id: str = "R2",
+                          frontier=None) -> None:
     gens = pd.DataFrame({
         "sample_id": ["s1", "s2"],
         "code": [
@@ -30,6 +31,7 @@ def _write_fake_artifacts(model_dir: Path, is_provisional: bool = True, ranker_i
     save_calibration(
         result, model_dir / "calibration.json",
         corpus_version="simulated-v2", is_provisional=is_provisional, ranker_id=ranker_id,
+        frontier=frontier,
     )
 
 
@@ -71,10 +73,29 @@ def _scan_target(tmp_path: Path) -> Path:
     return target
 
 
-def test_scan_alpha_override_is_not_implemented(tmp_path):
-    result = runner.invoke(app, ["scan", str(tmp_path), "--alpha", "0.1"])
+def test_scan_alpha_override_uses_the_certified_threshold_for_that_alpha(tmp_path):
+    _write_fake_artifacts(tmp_path, frontier=pd.DataFrame({
+        "alpha": [0.05, 0.10], "t_hat": [0.5, 0.4], "coverage": [0.6, 0.7], "n_vuln_calib": [10, 10],
+    }))
+    target = _scan_target(tmp_path)
+    result = runner.invoke(
+        app, ["scan", str(target), "--model-dir", str(tmp_path), "--no-llm",
+              "--alpha", "0.1", "--format", "json"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["certificate"]["alpha"] == 0.1
+
+
+def test_scan_alpha_override_refuses_an_uncertified_alpha_and_lists_valid_ones(tmp_path):
+    _write_fake_artifacts(tmp_path, frontier=pd.DataFrame({
+        "alpha": [0.05, 0.10], "t_hat": [0.5, 0.4], "coverage": [0.6, 0.7], "n_vuln_calib": [10, 10],
+    }))
+    target = _scan_target(tmp_path)
+    result = runner.invoke(
+        app, ["scan", str(target), "--model-dir", str(tmp_path), "--no-llm", "--alpha", "0.42"],
+    )
     assert result.exit_code == 2
-    assert "not implemented" in result.output
+    assert "0.05" in result.output and "0.1" in result.output
 
 
 def test_scan_without_a_trained_model_exits_nonzero_with_actionable_message(tmp_path):

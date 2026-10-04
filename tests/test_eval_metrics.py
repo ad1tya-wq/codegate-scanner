@@ -151,3 +151,40 @@ def test_scan_ground_truth_eval_multiple_findings_on_same_unit_count_once():
     metrics = scan_ground_truth_eval(result, ground_truth)
     assert metrics["true_positive"] == 1
     assert metrics["false_positive"] == 0
+
+
+# Held-out evaluation. The full-corpus AUC includes the samples the ranker
+# was trained on, so on its own it is a memorization figure.
+
+def _frames_with_splits():
+    labeled = pd.DataFrame({"sample_id": ["a", "b", "c", "d", "e"],
+                            "cwe": ["CWE-89"] * 5,
+                            "label": [0, 1, 0, 1, -1]})
+    scores = pd.DataFrame({"sample_id": ["a", "b", "c", "d", "e"],
+                           "ranker_id": ["R2"] * 5,
+                           "score": [0.9, 0.1, 0.2, 0.8, 0.5]})
+    gens = pd.DataFrame({"sample_id": ["a", "b", "c", "d", "e"],
+                         "split": ["train", "train", "test", "test", "test"]})
+    return labeled, scores, gens
+
+
+def test_ranker_score_frame_attaches_split_when_generations_are_given():
+    labeled, scores, gens = _frames_with_splits()
+    frame = ranker_score_frame(labeled, scores, generations_df=gens)
+    assert list(frame["split"]) == ["train", "train", "test", "test"]   # abstention dropped
+
+
+def test_separation_metrics_can_restrict_to_the_held_out_split():
+    labeled, scores, gens = _frames_with_splits()
+    frame = ranker_score_frame(labeled, scores, generations_df=gens)
+    assert ranker_separation_metrics(frame)["n_samples"] == 4
+    held_out = ranker_separation_metrics(frame, split="test")
+    assert held_out["n_samples"] == 2
+    assert held_out["roc_auc"] == 0.0    # the test pair is inverted: safe scored lower
+
+
+def test_separation_metrics_refuse_a_split_filter_without_split_information():
+    labeled, scores, _ = _frames_with_splits()
+    frame = ranker_score_frame(labeled, scores)
+    with pytest.raises(ValueError, match="split"):
+        ranker_separation_metrics(frame, split="test")

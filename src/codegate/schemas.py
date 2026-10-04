@@ -21,10 +21,8 @@ SCHEMAS: dict[str, dict[str, str]] = {
         "sample_id": "object",
         "cwe": "object",
         "label": "int64",              # 1 = vulnerable, 0 = safe
-        "semgrep_hit": "bool",
         "dynamic_verdict": "object",   # True/False/None (creds has no dynamic oracle)
         "static_verdict": "object",
-        "adjudicator_verdict": "bool",
         "consensus_rule_version": "object",
     },
     "scores": {

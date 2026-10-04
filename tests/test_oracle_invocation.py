@@ -65,3 +65,30 @@ def test_prelude_positional_params_ignores_star_args():
     exec("def f(a, b, *rest, **kw): pass", ns)
     names = [p.name for p in ns["positional_params"](ns["f"])]
     assert names == ["a", "b"]
+
+
+from codegate.oracles.invocation import harvest_allowlist_values
+
+
+def test_harvest_finds_set_members_and_dict_keys_including_module_level():
+    code = (
+        'TABLES = {"products": "products", "items": "items"}\n'
+        'def f(conn, keyword, table_name, fmt):\n'
+        '    if fmt not in {"png", "jpg"}:\n'
+        '        raise ValueError\n'
+        '    if table_name not in TABLES:\n'
+        '        raise ValueError\n'
+    )
+    values = harvest_allowlist_values(code)
+    assert {"products", "items", "png", "jpg"} <= set(values)
+
+
+def test_harvest_ignores_sentences_and_non_identifier_strings():
+    code = 'def f(x):\n    msgs = ["Invalid input, try again", "a b c"]\n    return x\n'
+    assert harvest_allowlist_values(code) == []
+
+
+def test_harvest_is_bounded_and_safe_on_unparseable_code():
+    assert harvest_allowlist_values("def f(:\n") == []
+    many = "ALLOWED = (" + ", ".join(f'"v{i}"' for i in range(100)) + ")\n"
+    assert len(harvest_allowlist_values(many)) <= 12

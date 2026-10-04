@@ -64,8 +64,7 @@ class VerifierResult:
 class GroqVerifierBackend:
     """
     Real verifier backend: Groq's OpenAI-compatible chat completions API.
-    Same request shape as research/generation/backends.py::GroqBackend, but
-    a distinct minimal interface (`ask(code) -> str`, not
+    A deliberately minimal interface (`ask(code) -> str`, not
     `generate(Prompt, seed) -> str`) -- verification sends a code snippet
     and expects a structured JSON verdict back, not a code-generation task,
     so reusing the Backend ABC directly would mean forcing a Prompt object

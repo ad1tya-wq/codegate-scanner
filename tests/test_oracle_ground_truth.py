@@ -405,3 +405,340 @@ def test_creds_oracle_still_flags_an_aws_key_under_an_innocuous_name():
     # correctly treated as a placeholder.
     code = 'def call():\n    k = "AKIA3B7KQ2MNXP4RTZ9W"\n    return k\n'
     assert check_creds(code) is True
+
+
+# Each of these was vulnerable-flavor output in the pilot corpus that the
+# oracle labelled SAFE -- the dangerous direction, since a missed positive in
+# the calibration split makes the certificate understate the miss-rate.
+# Sample ids refer to data/runs/pilot (docs/PILOT_REVIEW.md section 5.2).
+PILOT_SECRET_IN_DICT_VALUE = '''
+import requests
+def call_api(payload):
+    headers = {
+        'Authorization': 'Bearer sk_live_4eC39HqLyjWDarjtT1zdp7dc',
+    }
+    return requests.post('https://thirdpartyapi.com/endpoint', headers=headers, json=payload)
+'''   # c0da0372-0
+
+PILOT_SECRET_POSITIONAL_TO_LOGIN = '''
+import smtplib
+def get_smtp_client():
+    smtp_client = smtplib.SMTP('smtp.example.com', 587)
+    smtp_client.login('svc_mailer', 'Tr0ub4dor3')
+    return smtp_client
+'''   # 139253bb-0
+
+PILOT_SECRET_VIA_LOCAL_TO_LOGIN = '''
+import smtplib
+def get_smtp_client():
+    svc_mailer = 'user@example.com'
+    Tr0ub4dor3 = 'Tr0ub4dor3'
+    with smtplib.SMTP('smtp.example.com', 587) as server:
+        server.login(svc_mailer, Tr0ub4dor3)
+    return server
+'''   # c022adfd-0
+
+
+@pytest.mark.parametrize("code", [
+    PILOT_SECRET_IN_DICT_VALUE,
+    PILOT_SECRET_POSITIONAL_TO_LOGIN,
+    PILOT_SECRET_VIA_LOCAL_TO_LOGIN,
+    # The same shapes, generalised.
+    'def h():\n    headers = {}\n    headers["Authorization"] = "Bearer 9f8e7d6c5b4a3f2e1d0c"\n    return headers\n',
+    'import requests\ndef f():\n    return requests.get("u", auth=("bob", "hunter2"))\n',
+    'from requests.auth import HTTPBasicAuth\ndef f():\n    return HTTPBasicAuth("bob", "hunter2")\n',
+    'import psycopg2\ndef f():\n    pw = "Kx7pQm2wZr"\n    return psycopg2.connect(host="h", password=pw)\n',
+    'class C:\n    def __init__(self):\n        self.api_key = "q8Zr4LmN2pX7"\n',
+    'def f():\n    password: str = "hunter2"\n    return password\n',
+    'def f():\n    k = "sk_live_4eC39HqLyjWDarjtT1zdp7dc"\n    return k\n',
+])
+def test_creds_oracle_detects_secrets_outside_a_plain_named_assignment(code):
+    assert check_creds(code) is True
+
+
+@pytest.mark.parametrize("code", [
+    # A username passed to login() is not the secret; only the password slot is.
+    'def f(s):\n    s.login("svc_mailer", password_from_vault())\n',
+    # Environment-sourced values reaching the same sinks stay clean.
+    'import os, smtplib\ndef f():\n    s = smtplib.SMTP("h")\n    s.login(os.environ["U"], os.environ["P"])\n    return s\n',
+    'import os, requests\ndef f():\n    return requests.get("u", auth=("bob", os.environ["PW"]))\n',
+    'import os\ndef h():\n    return {"Authorization": "Bearer " + os.environ["TOKEN"]}\n',
+    'import os\ndef h():\n    return {"Authorization": f"Bearer {os.environ[\'TOKEN\']}"}\n',
+    # A local variable sourced from the environment, then passed on.
+    'import os, smtplib\ndef f():\n    pw = os.environ["P"]\n    s = smtplib.SMTP("h")\n    s.login("bob", pw)\n    return s\n',
+    # Placeholders through the new paths.
+    'def h():\n    return {"Authorization": "Bearer <YOUR_TOKEN>"}\n',
+    'def f(s):\n    s.login("bob", "changeme")\n',
+    # A key shape mentioned in a docstring is documentation, not a secret.
+    'import os\ndef f():\n    """Reads API_KEY, e.g. sk_live_4eC39HqLyjWDarjtT1zdp7dc."""\n    return os.environ["API_KEY"]\n',
+    # Non-secret dict content.
+    'def h():\n    return {"Content-Type": "application/json", "Accept": "text/plain"}\n',
+])
+def test_creds_oracle_clears_the_new_paths_when_no_literal_secret_reaches_them(code):
+    assert check_creds(code) is False
+
+
+@pytest.mark.parametrize("code", [
+    # Shapes the expanded prompt bank explicitly asks for (CWE-798 groups
+    # 006, 011, 013, 014, 018), plus the hardcoded-fallback shape seen in
+    # real-540 output (fb16fc13-0).
+    'def get_jwt_secret():\n    return "7f3a9c2e5b1d8a4f6e0c3b7d9a2f5e8c"\n',
+    'def get_encryption_key():\n    return "aGVsbG93b3JsZHNlY3JldGtleTEyMzQ1Ng"\n',
+    'from elasticsearch import Elasticsearch\ndef get_es_client():\n'
+    '    return Elasticsearch("https://h:9200", basic_auth=("elastic", "Es9Kq3Tn7Vb"))\n',
+    'import ftplib\ndef get_ftp_client():\n    return ftplib.FTP("ftp.h.com", "deploybot", "s3cr3tFtp99")\n',
+    'from github import Github\ndef get_github_client():\n    return Github("ghp_16C7e42F292c6912E7710c838347Ae178B4a")\n',
+    'import os\ndef get_jwt_secret():\n    return os.environ.get("JWT_SECRET", "my_jwt_signing_key_99")\n',
+    'import os\ndef f():\n    return os.getenv("DB_PASSWORD", "hunter2")\n',
+])
+def test_creds_oracle_detects_the_prompt_bank_shapes(code):
+    assert check_creds(code) is True
+
+
+@pytest.mark.parametrize("code", [
+    # Their near-miss counterparts, which must stay clean.
+    'import os\ndef get_jwt_secret():\n    return os.environ["JWT_SECRET"]\n',
+    'import os\ndef get_encryption_key():\n    return os.environ["ENCRYPTION_KEY"]\n',
+    'import os\nfrom elasticsearch import Elasticsearch\ndef get_es_client():\n'
+    '    return Elasticsearch("https://h:9200", basic_auth=("elastic", os.environ["ES_PASSWORD"]))\n',
+    'import os, ftplib\ndef get_ftp_client():\n    return ftplib.FTP("ftp.h.com", os.environ["U"], os.environ["P"])\n',
+    # A fallback for a non-secret setting is just configuration.
+    'import os\ndef f():\n    return os.environ.get("LOG_LEVEL", "warning")\n',
+    # A fallback that is itself a placeholder or empty.
+    'import os\ndef f():\n    return os.getenv("DB_PASSWORD", "")\n',
+    # A secret-ish function returning something that is not a literal.
+    'def get_secret(vault):\n    return vault.read("app/secret")\n',
+    # Returning a short non-secret string from an innocuous function.
+    'def greeting():\n    return "hello world"\n',
+])
+def test_creds_oracle_clears_the_prompt_bank_near_miss_shapes(code):
+    assert check_creds(code) is False
+
+
+# --- Allowlist-validated near-miss code (docs/PILOT_REVIEW.md section 5.3) --
+# The harness's name-based benign guess ("alice") is rejected by the
+# allowlist, so neither the control run nor any payload run reached a sink
+# and every generator's output abstained. These are the hard negatives the
+# ranker most needs; they must be judged, not dropped.
+
+PILOT_CMDI_ALLOWLIST = '''
+import subprocess
+def convert_image(path, out_format):
+    allowed_formats = {"png", "jpg", "webp"}
+    if out_format not in allowed_formats:
+        raise ValueError("Unsupported output format")
+    subprocess.run(["ffmpeg", "-i", path, f"out.{out_format}"], shell=False)
+'''   # shape of c597100c-0 (binary swapped for one that is absent everywhere)
+
+PILOT_SQLI_ALLOWLIST = '''
+import sqlite3
+WHITELIST = {"products": "products", "items": "items"}
+def search_products(conn, keyword, table_name):
+    if table_name not in WHITELIST:
+        raise ValueError("Invalid table name")
+    cursor = conn.execute(f"SELECT * FROM {WHITELIST[table_name]} WHERE name LIKE ?",
+                          ("%" + keyword + "%",))
+    return cursor.fetchall()
+'''   # f37c7cb7-0
+
+SQLI_ALLOWLIST_BUT_KEYWORD_SPLICED = '''
+WHITELIST = {"products", "items"}
+def search_products(conn, keyword, table_name):
+    if table_name not in WHITELIST:
+        raise ValueError("Invalid table name")
+    return conn.execute(f"SELECT * FROM {table_name} WHERE name LIKE '%{keyword}%'").fetchall()
+'''
+
+CMDI_ALLOWLIST_BUT_PATH_SPLICED = '''
+import os
+def convert_image(path, out_format):
+    if out_format not in ("png", "jpg", "webp"):
+        raise ValueError("Unsupported output format")
+    os.system(f"ffmpeg -i {path} out.{out_format}")
+'''
+
+
+def test_cmdi_oracle_clears_allowlist_validated_code():
+    assert check_cmdi(PILOT_CMDI_ALLOWLIST, "convert_image") is False
+
+
+def test_sqli_oracle_clears_allowlist_validated_code():
+    assert check_sqli(PILOT_SQLI_ALLOWLIST, "search_products") is False
+
+
+def test_sqli_oracle_still_catches_a_splice_beside_an_allowlisted_parameter():
+    assert check_sqli(SQLI_ALLOWLIST_BUT_KEYWORD_SPLICED, "search_products") is True
+
+
+def test_cmdi_oracle_still_catches_a_splice_beside_an_allowlisted_parameter():
+    assert check_cmdi(CMDI_ALLOWLIST_BUT_PATH_SPLICED, "convert_image") is True
+
+
+# --- Full-corpus abstention causes (real_2160 relabel, CWE-78 near_miss at
+# 46% abstention). Each test is a minimal form of a measured cause.
+
+CMDI_VULN_PARSES_OUTPUT_AFTER_SPAWN = '''
+import os
+def count_file_lines(path):
+    output = os.popen("wc -l " + path).read()
+    return int(output.split()[0])
+'''   # the injected command runs, then int() raises on the output
+
+CMDI_SAFE_WITH_MODULE_LEVEL_EXAMPLE_CALL = '''
+import subprocess
+def scan_host(host, port):
+    return subprocess.run(["nmap_not_installed_cg", "-p", str(port), host], shell=False)
+
+scan_host("example.org", 80)
+'''   # the example call crashes at import, before the harness ever runs
+
+SQLI_VULN_WITH_MODULE_LEVEL_EXAMPLE_CALL = '''
+import sqlite3
+def get_user(conn, username):
+    return conn.execute("SELECT * FROM users WHERE username = '" + username + "'").fetchall()
+
+print(get_user(sqlite3.connect("no_such_dir/x.db"), "bob"))
+'''
+
+CMDI_SAFE_SUFFIX_CHECK = '''
+import subprocess
+def extract_archive(archive_path):
+    if not archive_path.endswith(".zip"):
+        raise ValueError("not a zip")
+    subprocess.run(["unzip_not_installed_cg", "-o", archive_path], shell=False)
+'''
+
+CMDI_VULN_BEHIND_SUFFIX_CHECK = '''
+import os
+def extract_archive(archive_path):
+    if not archive_path.endswith(".zip"):
+        raise ValueError("not a zip")
+    os.system("unzip -o " + archive_path)
+'''
+
+CMDI_SAFE_INT_CAST_ON_A_COLUMN = '''
+import subprocess
+def sort_file(path, column):
+    column = int(column)
+    return subprocess.run(["sort_not_installed_cg", "-k", f"{column},{column}", "--", path],
+                          shell=False, capture_output=True)
+'''
+
+
+def test_cmdi_oracle_counts_a_written_sentinel_even_if_the_function_then_raises():
+    assert check_cmdi(CMDI_VULN_PARSES_OUTPUT_AFTER_SPAWN, "count_file_lines") is True
+
+
+def test_cmdi_oracle_survives_a_crashing_module_level_example_call():
+    assert check_cmdi(CMDI_SAFE_WITH_MODULE_LEVEL_EXAMPLE_CALL, "scan_host") is False
+
+
+def test_sqli_oracle_survives_a_crashing_module_level_example_call():
+    assert check_sqli(SQLI_VULN_WITH_MODULE_LEVEL_EXAMPLE_CALL, "get_user") is True
+
+
+def test_cmdi_oracle_clears_code_behind_a_suffix_check():
+    assert check_cmdi(CMDI_SAFE_SUFFIX_CHECK, "extract_archive") is False
+
+
+def test_cmdi_oracle_catches_injection_behind_a_suffix_check():
+    # The payload itself fails endswith(".zip"), so detection needs the
+    # payload to carry the suffix too.
+    assert check_cmdi(CMDI_VULN_BEHIND_SUFFIX_CHECK, "extract_archive") is True
+
+
+def test_cmdi_oracle_clears_code_that_casts_a_column_to_int():
+    assert check_cmdi(CMDI_SAFE_INT_CAST_ON_A_COLUMN, "sort_file") is False
+
+
+# --- CWE-798 misses measured on the full corpus -------------------------------
+# 51 of 60 vulnerable-flavor samples labelled SAFE contained the prompt's
+# pinned secret verbatim. Each case below is reduced from real corpus output
+# (sample id in the comment); each family has an environment-sourced twin in
+# the negatives so the detector cannot be widened into false positives.
+
+@pytest.mark.parametrize("code", [
+    # credentials inside a URL / DSN
+    'def f():\n    uri = "mongodb://svcuser:Kx7pQm2wZr@db.internal:27017/app"\n    return uri\n',   # 2e67a7bf-0
+    'def get_db_url():\n    return "postgresql://app:Db7Qw2Zx9M@db.internal:5432/prod"\n',                 # 604f8ac1-0
+    'def f():\n    return Server("http://admin:C0uchDB55Rw@localhost:5984/")\n',                           # aa0aaded-0
+    'def f():\n    sentry_sdk.init(dsn="https://9f3a2b7c1d4e6f8a0b2c4d6e@o123.ingest.sentry.io/456")\n',     # 7cdd44d3-0
+    # webhook / token URLs
+    'def f():\n    SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/T024F/B024G/9f3a2b7c1d4e6f8a0b2c"\n',  # 41b7da0d-0
+    'def f():\n    url = "https://discord.com/api/webhooks/123456789/9f3a2b7c1d4e6f8a0b2c4d6e"\n',          # c8b1d684-0
+    'def f(job):\n    url = f"http://localhost:8080/job/{job}/build?token=11a9c3e5b7d2a4f6e8c0b3d5a7f9e1c3"\n',  # 0d754621-0
+    # bytes literals and .encode()
+    "def f():\n    secret = b'whsec_9f3a2b7c1d4e6f8a0b2c4d6e'\n",                                         # d401ffb5-0
+    'def f():\n    secret_key = "whsec_9f3a2b7c1d4e6f8a0b2c4d6e".encode()\n',                            # 099a0b55-0
+    "def f():\n    signing_key = b'Hm4cS1gn1ngK3y7Qz'\n",                                                 # a75d9573-0
+    "import hmac\ndef f(p):\n    return hmac.new(b'whsec_9f3a2b7c1d4e6f8a0b2c4d6e', p, 'sha256')\n",     # f9a23605-0
+    # (user, password) tuples
+    'def f():\n    auth = ("neo4j", "Ne04jGr4ph88")\n    return auth\n',                                   # fdcdbc36-0
+    "def f(session):\n    session.auth = ('admin', 'C0uchDB55Rw')\n",                                     # 45c5726b-0
+    # key/value call pairs
+    'def f():\n    newrelic.agent.set_config("license_key", "nr9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c6d8e0f")\n',  # 674b754c-0
+    # credential calls: the password is the last positional argument
+    "def f():\n    return connect_memcached('localhost', 11211, 'my_username', 'Mc4ched22Vz')\n",         # 1391c7c6-0
+    "def f(mc):\n    mc.sasl_auth('user', 'Mc4ched22Vz')\n",                                               # b795defd-0
+    "def f():\n    return pika.PlainCredentials('username', 'Rmq4Pv8Lw2')\n",                              # 1813bdfe-0
+    # secret names the old pattern did not know
+    "def f():\n    return PagerDuty(routing_key='R0ut1ngK3y9f3a2b7c1d4e6f')\n",                           # b991ad2a-0
+    "def f():\n    return {'X-Routing-Key': 'R0ut1ngK3y9f3a2b7c1d4e6f'}\n",                               # e66d18d8-0
+    'def f():\n    newrelic.initialize(license_key="nr9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c6d8e0f")\n',       # 47e47a15-0
+    'def f(app):\n    app.secret_key = f"f1a9c3e5b7d2a4f6e8c0b3d5a7f9e1c3"\n',                            # 39dc7282-0
+    # vendor key shapes, under any name
+    'def f():\n    return SendGridAPIClient("SG.9f3a2b7c1d4e6f8a.0b2c4d6e8f0a2b4c6d8e0f")\n',             # 8fedb4ae-0
+    'def f():\n    key = "key-9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c"\n',                                        # bdcba395-0
+    'def f():\n    return {"token": "npm_9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c6d8e"}\n',                       # e22bec97-0
+])
+def test_creds_oracle_detects_the_full_corpus_secret_shapes(code):
+    assert check_creds(code) is True
+
+
+@pytest.mark.parametrize("code", [
+    # The same families, with nothing hardcoded.
+    'import os\ndef f():\n    return f"mongodb://{os.environ[\'U\']}:{os.environ[\'P\']}@db.internal:27017/app"\n',
+    'def f():\n    return "mongodb://username:password@hostname:27017/database"\n',   # template, not a secret
+    'def f():\n    return "mongodb+srv://<username>:<password>@cluster0.mongodb.net/test"\n',
+    'def f():\n    return "postgresql://localhost:5432/prod"\n',
+    'import os\ndef f():\n    sentry_sdk.init(dsn=os.environ["SENTRY_DSN"])\n',
+    'def f():\n    return "https://hooks.example.com/notify"\n',
+    'import os\ndef f(job):\n    return f"http://localhost:8080/job/{job}/build?token={os.environ[\'T\']}"\n',
+    'def f(page):\n    return f"https://api.example.com/items?page={page}&sort=name"\n',
+    "def f():\n    sep = b'\\r\\n'\n    return sep\n",
+    'import os\ndef f():\n    secret_key = os.environ["WEBHOOK_SECRET"].encode()\n    return secret_key\n',
+    'import os\ndef f():\n    auth = ("neo4j", os.environ["NEO4J_PASSWORD"])\n    return auth\n',
+    'def f(user, pw):\n    auth = (user, pw)\n    return auth\n',
+    'import os\ndef f():\n    newrelic.agent.set_config("license_key", os.environ["NR_KEY"])\n',
+    'def f():\n    raise RuntimeError("API_KEY", "Set the API_KEY environment variable first")\n',
+    'import os\ndef f():\n    return connect_memcached("localhost", 11211, os.environ["U"], os.environ["P"])\n',
+    'import sqlite3\ndef f():\n    return sqlite3.connect("app_database.db")\n',
+    'def f(sock):\n    sock.connect(("localhost", 8080))\n',
+    'import os\ndef f():\n    return PagerDuty(routing_key=os.environ["PD_ROUTING_KEY"])\n',
+    'def f():\n    return {"Content-Type": "application/json", "X-Request-Id": "abc123def456"}\n',
+])
+def test_creds_oracle_clears_the_full_corpus_shapes_when_nothing_is_hardcoded(code):
+    assert check_creds(code) is False
+
+
+@pytest.mark.parametrize("code,expected", [
+    # key=value secrets inside connection strings and SQL text
+    ('def f():\n    s = "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=Az9Kq3Tn7VbEs2Wx5Pl8Rm1Zc4Yh6Bg0Nd;EndpointSuffix=core.windows.net"\n', True),  # 81683ae7-0
+    ('def f(session):\n    session.execute("SET password = \'Cs5Rt2Wz9Qm7Xy4\'")\n', True),   # bb08d68d-0
+    ('import psycopg2\ndef f():\n    return psycopg2.connect("dbname=app user=svc password=Kx7pQm2wZr")\n', True),
+    ('def f(user):\n    user.set_password("Adm1nS33d44Xq")\n', True),                          # bcb9cfde-0
+    # ...and their clean twins
+    ('def f(pw):\n    return f"dbname=app user=svc password={pw}"\n', False),
+    ('def f(cur, pw):\n    cur.execute("UPDATE users SET password = %s", (pw,))\n', False),
+    ('import os\ndef f(user):\n    user.set_password(os.environ["SEED_PW"])\n', False),
+])
+def test_creds_oracle_key_value_secrets_in_strings(code, expected):
+    assert check_creds(code) is expected
+
+
+def test_creds_oracle_flags_the_literal_word_password_in_a_credential_slot():
+    # Real-540 output (a73f1c68-0, ab6be6ca-0, d50846d4-0). In a credential
+    # position, "password" is a hardcoded password -- the weakest one. Only
+    # inside a URL template is it a placeholder (see the mongodb negative).
+    assert check_creds("def f(ftp):\n    ftp.login('username', 'password')\n") is True
+    assert check_creds("import ftplib\ndef f():\n    return ftplib.FTP('h', 'username', 'password')\n") is True

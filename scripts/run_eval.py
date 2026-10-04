@@ -111,11 +111,22 @@ def main() -> int:
     if labeled_df is not None and scores_path.exists():
         print("[3/5] Ranker score distribution + separation metrics ...")
         scores_df = pd.read_parquet(scores_path)
-        score_frame = ranker_score_frame(labeled_df, scores_df)
+        gens_path = model_dir / "generations.parquet"
+        gens_df = pd.read_parquet(gens_path) if gens_path.exists() else None
+        score_frame = ranker_score_frame(labeled_df, scores_df, generations_df=gens_df)
         plot_score_distribution_by_label(score_frame, str(OUT_DIR / "score_distribution.png"))
+        # The held-out figure is the one to quote. The full-corpus figure
+        # includes the ranker's own training samples and is printed only so
+        # the gap between the two is visible.
         sep = ranker_separation_metrics(score_frame)
-        summary["ranker_separation"] = sep
-        print(f"      ROC-AUC={sep['roc_auc']:.4f} over n={sep['n_samples']} labeled samples")
+        summary["ranker_separation_full_corpus"] = sep
+        print(f"      ROC-AUC (full corpus, includes training data) = {sep['roc_auc']:.4f}  n={sep['n_samples']}")
+        if gens_df is not None:
+            held = ranker_separation_metrics(score_frame, split="test")
+            summary["ranker_separation_heldout"] = held
+            print(f"      ROC-AUC (held-out test split -- quote this)  = {held['roc_auc']:.4f}  n={held['n_samples']}")
+        else:
+            print(f"      held-out AUC skipped -- {gens_path} not found, so splits are unknown")
     else:
         print(f"      skipped -- {scores_path} not found")
 

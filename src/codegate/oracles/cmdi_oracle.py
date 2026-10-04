@@ -1,14 +1,13 @@
 from __future__ import annotations
-import re
 import tempfile
 import uuid
 from pathlib import Path
 from codegate.oracles.ast_utils import function_exists
-from codegate.oracles.invocation import HARNESS_PRELUDE
+from codegate.oracles.invocation import (
+    HARNESS_PRELUDE, benign_candidates, guarded_exec_source, harvest_affixes,
+)
 from codegate.oracles.sandbox import run_sandboxed
 
-
-_FUTURE_IMPORT = re.compile(r"^from __future__ import .*$", re.MULTILINE)
 
 _SHELL_SINK_MARKERS = (
     "subprocess", "os.system", "os.popen", "os.exec", "os.spawn",
@@ -61,11 +60,20 @@ def check_cmdi(code: str, function_name: str) -> bool | None:
     with tempfile.TemporaryDirectory() as tmp:
         sentinel = Path(tmp) / f"cg_pwned_{uuid.uuid4().hex}.txt"
         payload_host = f"127.0.0.1 & echo pwned > {sentinel}"
+        # A payload that fails the code's own suffix/prefix check never
+        # reaches the shell, so injection behind `path.endswith(".zip")`
+        # was undetectable. Affixed variants carry the expected suffix
+        # (via a trailing harmless `echo`) or prefix.
+        prefixes, suffixes = harvest_affixes(code)
+        payloads = ([payload_host]
+                    + [f"{payload_host} & echo cg{sfx}" for sfx in suffixes]
+                    + [pfx + payload_host for pfx in prefixes])
 
         harness = f"""
 _fn = {function_name}
 _params = positional_params(_fn)
-_payload = {payload_host!r}
+_payloads = {payloads!r}
+_allowlist = {benign_candidates(code)!r}
 
 
 def _reached_a_spawn(args):
@@ -100,35 +108,45 @@ else:
     # exactly the samples that teach the ranker what safe-but-alarming code
     # looks like.
     _benign = [benign_value_for(p.name) for p in _params]
-    if _reached_a_spawn(_benign):
-        _observed = True
-
-    for _i in range(len(_params)):
-        _args = list(_benign)
-        _args[_i] = _payload
-        if _reached_a_spawn(_args):
+    for _vec in benign_vectors(_params, _allowlist):
+        if _reached_a_spawn(_vec):
             _observed = True
+            _benign = _vec
+            break
+
+    for _payload in _payloads:
+        for _i in range(len(_params)):
+            _args = list(_benign)
+            _args[_i] = _payload
+            if _reached_a_spawn(_args):
+                _observed = True
 
 print("CODEGATE_DONE" if _observed else "CODEGATE_NOEVIDENCE")
 """
         # Preamble first, then the generated code, then the harness. The
         # preamble installs the missing-module stub finder, and the
         # generated code's imports run at module level -- putting the code
-        # first means `import psycopg2` dies before the finder exists.
-        # `from __future__` is stripped because it is only legal as a
-        # file's first statement and the code is no longer first.
+        # first means `import psycopg2` dies before the finder exists. The
+        # code runs inside a guard so a crashing module-level example call
+        # cannot kill the harness (see `guarded_exec_source`).
         full_source = (
             HARNESS_PRELUDE + "\n"
-            + _FUTURE_IMPORT.sub("", code) + "\n"
+            + guarded_exec_source(code) + "\n"
             + harness
         )
         # Raised from 5s: the harness now makes one call per parameter
         # inside a single process instead of exactly one call overall.
         result = run_sandboxed(full_source, harness="", timeout_s=15.0)
 
+        # A written sentinel is direct proof the payload reached a shell, so
+        # it decides the verdict before anything else. Code that parses the
+        # command's output afterwards (`int(output.split()[0])`) raises once
+        # the payload has run, which used to read as "never reached a
+        # spawn" and abstain on proven-vulnerable code.
+        if sentinel.exists():
+            return True
         if result.timed_out:
             return None
         if "CODEGATE_DONE" not in result.stdout:
             return None
-
-        return sentinel.exists()
+        return False

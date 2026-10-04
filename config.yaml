@@ -30,10 +30,6 @@ generators:
   - codellama:7b
   - codegemma:7b-instruct
 
-adjudicator: gemini-flash   # label adjudicator — not a generator.
-                            # Not required for the Ollama corpus run: the dynamic
-                            # oracles are authoritative for CWE-89/78 and the static
-                            # oracle for CWE-798, so consensus never needs its vote.
 verifier: llama-3.3-70b-groq # escalation verifier — pre-registered, disclosed overlap w/ generator role
 
 # k stays at 1 on purpose. LTT's binomial p-value assumes the calibration

@@ -157,26 +157,19 @@ def test_check_creds_clears_safe_fixture():
     assert check_creds(code) is False
 
 
-def test_consensus_label_unanimous_vulnerable():
-    assert consensus_label("CWE-89", semgrep_hit=True, dynamic_verdict=True,
-                            static_verdict=None, adjudicator_verdict=True) == 1
-
-
-def test_consensus_label_unanimous_safe():
-    assert consensus_label("CWE-89", semgrep_hit=False, dynamic_verdict=False,
-                            static_verdict=None, adjudicator_verdict=False) == 0
-
-
-def test_consensus_label_dynamic_oracle_breaks_semgrep_false_positive():
-    # semgrep flags a pattern but the dynamic PoC proves it's not exploitable;
-    # dynamic evidence outranks static pattern-matching in the consensus rule.
-    assert consensus_label("CWE-89", semgrep_hit=True, dynamic_verdict=False,
-                            static_verdict=None, adjudicator_verdict=False) == 0
+def test_consensus_label_takes_the_dynamic_verdict_for_dynamic_cwes():
+    assert consensus_label("CWE-89", dynamic_verdict=True, static_verdict=None) == 1
+    assert consensus_label("CWE-78", dynamic_verdict=False, static_verdict=None) == 0
 
 
 def test_consensus_label_creds_uses_static_verdict_not_dynamic():
-    assert consensus_label("CWE-798", semgrep_hit=True, dynamic_verdict=None,
-                            static_verdict=True, adjudicator_verdict=True) == 1
+    assert consensus_label("CWE-798", dynamic_verdict=None, static_verdict=True) == 1
+
+
+def test_consensus_label_refuses_to_coerce_a_missing_verdict():
+    # Abstention is a distinct state; it must never become a 0 here.
+    with pytest.raises(ValueError, match="abstain"):
+        consensus_label("CWE-89", dynamic_verdict=None, static_verdict=None)
 
 
 def test_run_semgrep_flags_sqli_vulnerable_fixture():

@@ -166,7 +166,6 @@ def main() -> int:
         cfg, prompts, backends,
         is_simulated=False,
         out_dir=out_dir,
-        use_semgrep_and_adjudicator=True,
         checkpoint_path=checkpoint,
     )
 

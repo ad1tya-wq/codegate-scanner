@@ -42,10 +42,6 @@ def main() -> int:
                         help="path to an existing generations.parquet")
     parser.add_argument("--out-dir", required=True,
                         help="where to write labeled.parquet (never data/model/)")
-    parser.add_argument("--no-semgrep", action="store_true",
-                        help="skip the semgrep pass (much faster, and the "
-                             "dynamic oracles are authoritative for CWE-89/78 "
-                             "and the static one for CWE-798 anyway)")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -56,7 +52,7 @@ def main() -> int:
         )
 
     gen_df = pd.read_parquet(args.generations)
-    labeled = relabel(gen_df, use_semgrep=not args.no_semgrep)
+    labeled = relabel(gen_df)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     labeled.to_parquet(out_dir / "labeled.parquet")

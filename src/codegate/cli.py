@@ -10,7 +10,9 @@ from codegate.env import get_env
 from codegate.report.json_sarif import to_json, to_sarif
 from codegate.report.pdf import generate_pdf
 from codegate.report.terminal import render_terminal
-from codegate.research.artifacts import ArtifactVersionError, load_artifacts
+from codegate.research.artifacts import (
+    ArtifactVersionError, UncertifiedAlphaError, load_artifacts, load_calibration,
+)
 from codegate.research.corpus.prompts import load_prompt_bank
 from codegate.research.generation.backends import OllamaBackend, SimulatedBackend, stable_seed
 from codegate.scan.pipeline import run_scan
@@ -93,7 +95,6 @@ def calibrate(
     )
     summary = run_full_pipeline(
         cfg, prompts, backends, is_simulated=not real, out_dir=out_dir,
-        use_semgrep_and_adjudicator=real,
     )
     console.print(
         f"Vulnerable rate: {summary['vuln_rate']:.2%}  |  "
@@ -125,13 +126,18 @@ def scan(
         raise typer.Exit(code=1)
 
     if alpha is not None:
-        console.print(
-            "[red]--alpha is not implemented yet[/red] -- overriding the certified "
-            "threshold requires recomputing it from the calibration trace against a "
-            "real corpus, deferred until Track A lands (see docs/ENGINEERING_LOG.md, "
-            "section 6). Re-run `codegate calibrate` if you need a different alpha."
-        )
-        raise typer.Exit(code=2)
+        # Checked before scanning so a bad alpha fails in milliseconds, not
+        # after a semgrep pass. Only alphas LTT actually certified at
+        # calibration time are accepted -- an interpolated threshold would
+        # carry no guarantee.
+        try:
+            load_calibration(model_dir / "calibration.json").at_alpha(alpha)
+        except FileNotFoundError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=1)
+        except UncertifiedAlphaError as exc:
+            console.print(f"[red]{exc}[/red] Re-run `codegate calibrate` to certify a different alpha.")
+            raise typer.Exit(code=2)
 
     verifier_model: str | None = None
     verifier_backend = None
@@ -144,7 +150,7 @@ def scan(
             verifier_backend = build_verifier_backend(verifier_model)
 
     try:
-        result = run_scan(path, model_dir=model_dir, verifier=verifier_backend)
+        result = run_scan(path, model_dir=model_dir, verifier=verifier_backend, alpha=alpha)
     except (FileNotFoundError, ArtifactVersionError) as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)

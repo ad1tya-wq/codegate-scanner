@@ -37,7 +37,6 @@ def main() -> int:
 
     summary = run_full_pipeline(
         cfg, prompts, backends, is_simulated=True, out_dir=Path(args.out_dir),
-        use_semgrep_and_adjudicator=False,
     )
 
     print("\n=== CODEGATE DRY RUN SUMMARY ===")

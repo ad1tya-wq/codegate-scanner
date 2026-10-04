@@ -1,5 +1,6 @@
 from __future__ import annotations
 import re
+import textwrap
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +60,10 @@ _DELIMITER_PATTERNS = [
     re.compile(r"<pre>\n?(.*?)</pre>", re.DOTALL | re.IGNORECASE),
 ]
 _DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+\w+\s*\(", re.MULTILINE)
+_DETAILS_RE = re.compile(r"<details>(.*?)</details>", re.DOTALL | re.IGNORECASE)
+# Named tags only: a generic <...> pattern would also eat `a<b and c>d`.
+_HTML_TAG_RE = re.compile(r"<summary>.*?</summary>|</?(?:b|br|i|em|strong|p|code|pre)\s*/?>",
+                          re.DOTALL | re.IGNORECASE)
 
 
 def extract_code(raw: str) -> str:
@@ -82,6 +87,19 @@ def extract_code(raw: str) -> str:
         for block in pattern.findall(raw):
             if _DEF_RE.search(block):
                 return block
+
+    # Two codellama shapes seen in the pilot corpus, tried only when no
+    # well-formed delimiter held a def: code wrapped in an HTML <details>
+    # block, and indented code followed by a closing fence that was never
+    # opened. Both used to fall through to `raw`, fail to parse, and abstain.
+    for block in _DETAILS_RE.findall(raw):
+        body = _HTML_TAG_RE.sub("", block)
+        if _DEF_RE.search(body):
+            return textwrap.dedent(body).strip() + "\n"
+    if not raw.lstrip().startswith("```") and "```" in raw:
+        head = raw.split("```", 1)[0]
+        if _DEF_RE.search(head):
+            return textwrap.dedent(head).strip() + "\n"
     return raw
 
 
@@ -97,14 +115,10 @@ def _first_function_name(code: str) -> str | None:
     return None
 
 
-def label_row(row: pd.Series, use_semgrep_and_adjudicator: bool = False) -> dict:
+def label_row(row: pd.Series) -> dict:
     """
     Runs the appropriate oracle(s) for one generated snippet and applies the
     consensus rule, returning one `labeled` row.
-
-    `use_semgrep_and_adjudicator=False` (the default, used by the simulated
-    dry run) skips the semgrep call, which is too slow to invoke per-row at
-    corpus scale. Real runs pass True.
 
     Returns LABEL_ABSTAIN when no oracle reached a verdict. Callers must
     exclude those rows rather than treating them as safe.
@@ -135,14 +149,6 @@ def label_row(row: pd.Series, use_semgrep_and_adjudicator: bool = False) -> dict
     elif cwe == "CWE-798":
         static_verdict = check_creds(code)
 
-    semgrep_hit = False
-    adjudicator_verdict = False
-    if use_semgrep_and_adjudicator:
-        from codegate.oracles.semgrep_oracle import run_semgrep
-        semgrep_hit = run_semgrep(code)["hit"]
-        # adjudicator_verdict left False until a GeminiBackend-based
-        # adjudicator call is wired in -- see NEEDS_FROM_YOU.md item 1.
-
     if dynamic_verdict is None and static_verdict is None:
         # The oracle could not reach a verdict (function not found, timeout,
         # harness error). This is NOT evidence of safety. Recording it as 0
@@ -152,21 +158,19 @@ def label_row(row: pd.Series, use_semgrep_and_adjudicator: bool = False) -> dict
         # LABEL_ABSTAIN is excluded from training and calibration upstream.
         label = LABEL_ABSTAIN
     else:
-        label = consensus_label(cwe, semgrep_hit, dynamic_verdict, static_verdict, adjudicator_verdict)
+        label = consensus_label(cwe, dynamic_verdict, static_verdict)
 
     return {
         "sample_id": row["sample_id"],
         "cwe": cwe,
         "label": label,
-        "semgrep_hit": semgrep_hit,
         "dynamic_verdict": dynamic_verdict,
         "static_verdict": static_verdict,
-        "adjudicator_verdict": adjudicator_verdict,
         "consensus_rule_version": CONSENSUS_RULE_VERSION,
     }
 
 
-def relabel(gen_df: pd.DataFrame, use_semgrep: bool = True) -> pd.DataFrame:
+def relabel(gen_df: pd.DataFrame) -> pd.DataFrame:
     """
     Re-run the oracles over an already-generated corpus, returning a fresh
     `labeled` frame.
@@ -182,7 +186,7 @@ def relabel(gen_df: pd.DataFrame, use_semgrep: bool = True) -> pd.DataFrame:
     df = gen_df.copy()
     df["code"] = df["code"].map(extract_code)
     return pd.DataFrame([
-        label_row(row, use_semgrep_and_adjudicator=use_semgrep)
+        label_row(row)
         for _, row in df.iterrows()
     ])
 
@@ -204,9 +208,9 @@ def run_full_pipeline(
     backends: dict[str, Backend],
     is_simulated: bool,
     out_dir: Path,
-    use_semgrep_and_adjudicator: bool = False,
     checkpoint_path: Path | None = None,
     pregenerated_df: pd.DataFrame | None = None,
+    corpus_version: str | None = None,
 ) -> dict:
     """
     Generation -> oracle labeling -> consensus -> R2 ranking -> LTT
@@ -253,7 +257,7 @@ def run_full_pipeline(
     print(f"Generated {len(gen_df)} snippets across {len(backends)} generators (is_simulated={is_simulated})")
 
     labeled_rows = [
-        label_row(row, use_semgrep_and_adjudicator=use_semgrep_and_adjudicator)
+        label_row(row)
         for _, row in gen_df.iterrows()
     ]
     labeled_df = pd.DataFrame(labeled_rows)
@@ -324,12 +328,17 @@ def run_full_pipeline(
         # simulated corpus is provisional by definition (see
         # docs/ENGINEERING_LOG.md guardrail G1), regardless of how the
         # certificate itself turned out.
-        corpus_version = "simulated-v2" if is_simulated else "real-540"
+        # The caller names the corpus. This used to be hardcoded "real-540",
+        # which would have stamped every later real corpus with the wrong
+        # name in calibration.json and every report.
+        if corpus_version is None:
+            corpus_version = "simulated-v2" if is_simulated else "real-unversioned"
         is_provisional = is_simulated
         save_model(ranker, out_dir / "model.joblib")
         save_calibration(
             operating, out_dir / "calibration.json",
             corpus_version=corpus_version, is_provisional=is_provisional,
+            frontier=frontier_df,   # enables scan-time --alpha
         )
         summary["corpus_version"] = corpus_version
         summary["is_provisional"] = is_provisional

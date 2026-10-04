@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-# Consensus rule v1 (documented, see spec):
-# - CWE-89 / CWE-78 (dynamic oracle available): dynamic verdict is authoritative
-#   when it returns a verdict (not None). Dynamic evidence outranks static
-#   pattern-matching, since it observed actual exploit behavior. When the
-#   dynamic oracle abstains (None -- function not found / errored), fall back
-#   to semgrep_hit AND adjudicator_verdict both agreeing.
-# - CWE-798 (no dynamic oracle possible): static_verdict is authoritative when
-#   present; falls back to semgrep_hit AND adjudicator_verdict otherwise.
-CONSENSUS_RULE_VERSION = "v1"
+# Consensus rule v2:
+# - CWE-89 / CWE-78: the dynamic oracle's verdict, which observed the code's
+#   actual behaviour.
+# - CWE-798 (no dynamic oracle possible): the static oracle's verdict.
+#
+# v1 also carried a fallback for when the oracle abstained -- "semgrep hit AND
+# LLM adjudicator agrees" -- but it could never fire: label_row returns
+# LABEL_ABSTAIN before reaching this function whenever the oracle has no
+# verdict, and the adjudicator was never wired in (its verdict was hard-coded
+# False). Both were removed after confirming nothing read them: the ranker
+# trains on code alone. See docs/ENGINEERING_LOG.md section 12.9.
+CONSENSUS_RULE_VERSION = "v2"
 
 _DYNAMIC_CWES = {"CWE-89", "CWE-78"}
 _STATIC_ONLY_CWES = {"CWE-798"}
@@ -16,19 +19,18 @@ _STATIC_ONLY_CWES = {"CWE-798"}
 
 def consensus_label(
     cwe: str,
-    semgrep_hit: bool,
     dynamic_verdict: bool | None,
     static_verdict: bool | None,
-    adjudicator_verdict: bool,
 ) -> int:
     if cwe in _DYNAMIC_CWES:
-        if dynamic_verdict is not None:
-            return int(dynamic_verdict)
-        return int(semgrep_hit and adjudicator_verdict)
+        verdict = dynamic_verdict
+    elif cwe in _STATIC_ONLY_CWES:
+        verdict = static_verdict
+    else:
+        raise ValueError(f"consensus_label: unrecognized CWE '{cwe}', update _DYNAMIC_CWES/_STATIC_ONLY_CWES")
 
-    if cwe in _STATIC_ONLY_CWES:
-        if static_verdict is not None:
-            return int(static_verdict)
-        return int(semgrep_hit and adjudicator_verdict)
-
-    raise ValueError(f"consensus_label: unrecognized CWE '{cwe}', update _DYNAMIC_CWES/_STATIC_ONLY_CWES")
+    if verdict is None:
+        # Callers abstain before asking; reaching here means a caller would
+        # otherwise coerce "no evidence" into a label.
+        raise ValueError(f"consensus_label: no oracle verdict for {cwe} -- abstain instead")
+    return int(verdict)
