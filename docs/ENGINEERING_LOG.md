@@ -1692,3 +1692,35 @@ data).
    somewhat optimistic. This is the same concern that ruled out
    `samples_per_prompt > 1` (§12.7), in milder form. A task-group cluster
    bootstrap puts the test-split miss rate between 0.9% and 18.4%.
+
+### 12.11 · Promoted at α = 0.10 (2026-10-04)
+
+Decision: ship the real-corpus model at α = 0.10 (option 2 of 12.10), and
+treat a cluster-aware certificate as the follow-up (branch
+`feat/cluster-aware-certificate`).
+
+No retraining was needed. The ranker and the calibration scores do not
+depend on α, and LTT at 0.10 on the saved calibration scores reproduces
+the frontier row exactly (t̂ = 0.7763, coverage 56.4%). `calibration.json` is
+the trained certificate restated with `Calibration.at_alpha(0.10)`, and its
+frontier is kept, so `codegate scan --alpha 0.05` still uses the certified
+0.05 threshold. `ltt_trace.csv` was recomputed at 0.10. `config.yaml` now
+says `alpha: 0.10`, so a fresh calibration run reproduces the shipped
+operating point.
+
+| Measure (`python scripts/run_eval.py`) | Simulated model | Real model at α = 0.10 |
+|---|---|---|
+| Ranker ROC-AUC, held-out test split | not measurable | **0.891** (n = 391) |
+| Ranker ROC-AUC, including training data | 1.00 | 0.926 |
+| Demo app, static + gate only | P 0.50 / R 1.00 | **P 0.33 / R 1.00** |
+| Calib vulnerable auto-approved | — | 13 / 206 (binom.cdf = 0.043 ≤ δ) |
+| Test split vulnerable auto-approved | — | 14 / 107 = 13.1% |
+
+The real model still catches every vulnerable function in the demo app,
+but escalates more safe ones to the verifier. That is a conservative
+failure, and it costs LLM calls, not misses. The test-split figure
+exceeds α. As at 0.05 this is not significant on its own (P(≥ 14 | 107,
+0.10) = 0.18 under independence), but it is the same clustering
+effect described in 12.10, and it is the reason the cluster-aware
+certificate is next. The live-verifier row of the README was not re-run.
+It needs a Groq key and spends API calls.

@@ -10,7 +10,7 @@ def test_load_config_returns_dataclass():
 
 def test_load_config_values():
     cfg = load_config(str(REPO_ROOT / "config.yaml"))
-    assert cfg.alpha == 0.05
+    assert cfg.alpha == 0.10   # operating point since 2026-10-04, see config.yaml
     assert cfg.delta == 0.05
     assert "CWE-89" in cfg.cwes
     assert len(cfg.generators) == 4

@@ -1,10 +1,32 @@
 {
-  "t_hat": 0.6612771114113369,
-  "alpha": 0.05,
+  "t_hat": 0.776337949900295,
+  "alpha": 0.1,
   "delta": 0.05,
-  "n_vuln_calib": 60,
+  "n_vuln_calib": 206,
   "ranker_id": "R2",
-  "corpus_version": "simulated-v2",
-  "is_provisional": true,
-  "created_at": "2026-09-01T15:41:51.228570+00:00"
+  "corpus_version": "real-2040-sym",
+  "is_provisional": false,
+  "created_at": "2026-10-04T15:15:07.290441+00:00",
+  "frontier": [
+    {
+      "alpha": 0.05,
+      "t_hat": 0.8276334772892147,
+      "coverage": 0.48927613941018766
+    },
+    {
+      "alpha": 0.1,
+      "t_hat": 0.776337949900295,
+      "coverage": 0.564343163538874
+    },
+    {
+      "alpha": 0.2,
+      "t_hat": 0.7444349791701037,
+      "coverage": 0.6300268096514745
+    },
+    {
+      "alpha": 0.3,
+      "t_hat": 0.6982145285019661,
+      "coverage": 0.693029490616622
+    }
+  ]
 }
