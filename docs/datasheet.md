@@ -96,31 +96,42 @@ switch over (API keys, mainly).
 
 ## Preprocessing / labeling
 
-**Labeling is multi-oracle, with dynamic evidence given priority over
-static pattern-matching** (documented as "Consensus rule v1" in
-`src/codegate/oracles/consensus.py`):
+**Labels come from one authoritative oracle per CWE** (consensus rule v2,
+`src/codegate/oracles/consensus.py`). Dynamic oracles observe the code's
+behaviour, so they are used wherever one is possible. When the oracle cannot
+reach a verdict, the sample is recorded as an **abstention**: excluded from
+training and calibration, never counted as safe. A SAFE verdict requires
+positive evidence that the code ran its sink without being exploited.
 
-| CWE | Primary oracle | Method |
+| CWE | Oracle | Method |
 |---|---|---|
-| CWE-89 | `oracles/sqli_oracle.py` | Injects a payload (`' OR '1'='1`) into an in-memory sqlite3 fixture via the generated function itself, and checks whether the returned row count widened beyond a legitimate single-row lookup — i.e., the injection *executed*, not merely "the code looks suspicious." |
-| CWE-78 | `oracles/cmdi_oracle.py` | Injects a shell-metacharacter payload (`& echo pwned > <sentinel>`) and checks whether the sentinel file was actually created — again, executed evidence, not a pattern match. |
-| CWE-798 | `oracles/creds_oracle.py` | Static only — no dynamic oracle is possible for "is this credential real." AST-based: a string literal assigned to, passed as, or defaulted for a variable/parameter whose name matches a secret-like pattern, above an entropy threshold, excluding known placeholder markers. |
+| CWE-89 | `oracles/sqli_oracle.py` | Runs the generated function against a recording DB-API connection over a real in-memory SQLite fixture, with an SQL-injection payload in each parameter in turn. VULNERABLE when the payload reaches an executed statement as query *text*. SAFE when SQL was observed running and the payload only ever arrived as a bound parameter. Independent of statement type (SELECT, INSERT, UPDATE, DELETE, ORDER BY, ...) and of paramstyle, so Postgres-idiom code is judged too. |
+| CWE-78 | `oracles/cmdi_oracle.py` | Runs the generated function with a shell-command payload in each parameter in turn. VULNERABLE when a sentinel file the payload writes actually appears. That is direct proof, and it counts even if the function raises afterwards. SAFE when the function was observed reaching a process spawn without the sentinel appearing. |
+| CWE-798 | `oracles/creds_oracle.py` | Static (AST) only: no execution can tell whether a credential is real. Flags a non-placeholder literal reaching a credential position: a secret-named variable, attribute, keyword, dict key or default, the password slot of a credential call, a `(user, password)` tuple, a secret-named function's return value, or a hardcoded fallback. It also flags unambiguous shapes under any name: vendor key prefixes, webhook URLs, and passwords inside URLs or connection strings. No entropy threshold: real passwords are low-entropy by nature. |
 
-A custom, offline semgrep ruleset (`data/semgrep_rules/codegate_rules.yaml`)
-supplements these as a secondary signal and a fallback when the primary
-oracle abstains (function not found, timeout). It was written after
-verifying empirically that semgrep's free-tier community registry packs
-(`p/python`, `p/security-audit`, `p/sql-injection`) produce **zero
-findings** on this corpus's raw-stdlib `sqlite3`/`subprocess` code — those
-packs mostly target framework code (SQLAlchemy/Django/Flask), which this
-corpus deliberately does not use.
+Both dynamic oracles call the function with signature-aware arguments, and
+first run a benign control call to establish that the function works at all.
+The benign values come from the parameter names, from the code's own
+allowlists and suffix checks, and from a type flip. All oracle code runs in
+a subprocess sandbox; the online scanner never executes user code.
 
-**The LLM adjudicator role (`gemini-flash` in `config.yaml`) is defined
-but not yet exercised** — no Gemini API key was available tonight. When
-active, it participates only as a fallback vote when the primary
-dynamic/static oracle abstains, never as the sole labeler, and — per the
-design's role-reuse guard — is never one of the code generators, so it
-cannot rate its own output.
+**Label noise found and fixed, measured on real corpora** (see
+`docs/ENGINEERING_LOG.md` §12 for every number and the command behind it):
+the original harnesses abstained on ~44% of the dynamic prompt bank. The
+original SQLi oracle labelled injectable DELETE/UPDATE code safe and
+parameterized `COUNT(*)` code vulnerable. The original credentials oracle
+missed most realistic hardcoded secrets: on the full corpus it initially
+labelled 51 of 60 vulnerable-flavor samples safe with the secret present
+verbatim. After the fixes, near-miss and neutral samples carry no oracle
+false positives. Every one of their VULN labels was checked by hand and is
+code the model really wrote vulnerable, despite a prompt asking for safe
+code.
+
+**Not used for labels.** Semgrep (`data/semgrep_rules/codegate_rules.yaml`)
+is the R0 baseline ranker and the scanner's static pre-pass, not a labeller.
+An LLM label adjudicator was declared in the original design but never
+called. It was removed on 2026-10-04, along with the consensus fallback it
+fed, once it was confirmed that nothing downstream read either.
 
 **Known label-quality caveats, stated plainly:**
 - No manual/human-validated subsample has been labeled yet — Cohen's κ

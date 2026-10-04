@@ -35,7 +35,7 @@ Four status labels are used throughout:
 | — | Evaluation & metrics (`research/eval/metrics.py`, `scripts/run_eval.py`) | SOLID (mechanism) / PROVISIONAL (ranker-quality numbers, per §6) | — | 187 passed |
 | 8 | Retrain on real corpus (join point) | ATTEMPTED on Track A's 516-sample corpus, found 3 real bugs, **not yet certifiable** (§11) — shipped model stays `simulated-v2` | `13d8b83`–`8ea9d39` | 201 passed |
 
-Current test suite: **187 passed**, 0 failed, ~390s wall clock
+Current test suite: **416 passed**, 0 failed, ~10 min wall clock (2026-10-04)
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -892,35 +892,40 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-187 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
-verified this session).
+416 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+counts per file regenerated 2026-10-04).
 
 | File | Tests | Protects |
 |---|---|---|
-| `test_oracles.py` | 21 | Core oracle contracts: `function_exists`, sandbox execution/timeout/exit-code capture, SQLi/cmdi/creds detection on fixtures, consensus rule (all four branches), semgrep hit/clear on fixtures |
-| `test_scan_pipeline.py` | 15 | `Finding` source validation, semgrep-to-function mapping, the no-execution invariant, gate partitioning, full escalation under an uncertified threshold, skipped-file reporting, actionable missing-model error, verifier confirming/clearing/failing an escalated unit, cache reuse across scans, token/call accounting for auto-approved and freshly-verified units, `calibration` pass-through, no-verifier backward compatibility |
-| `test_oracle_robustness.py` | 15 | The SQLi table-name abstention-defect class specifically — parametrized over 7+ table names, plus the sink-shortcut correctness tests |
-| `test_verifier.py` | 14 | JSON verdict parsing (clean/embedded-in-prose/malformed/missing-field/unrecognized-CWE), no-backend and backend-exception degradation, unparseable-response non-caching, cache write and cache-hit-skips-backend, `Finding` mapping incl. lineno fallback, `build_verifier_backend`'s key-present/absent branches and role-to-model-id mapping |
-| `test_cli.py` | 12 | `info`/`calibrate`/`scan` via `CliRunner`: missing-model message, certificate table (corpus version shown plainly, no separate provisional banner — removed 2026-09-02, see decision log), version-guard surfaced through the CLI, invalid `--format` rejection, `--alpha` rejection, real `scan` runs across `terminal`/`json`/`sarif`/`pdf`, JSON/PDF written to `--output`, end-to-end `calibrate` artifact write |
-| `test_generation.py` | 10 | `SimulatedBackend` output shape/determinism, `stable_seed`, real-backend construction |
-| `test_report_pdf.py` | 11 | Pygments-to-reportlab-markup highlighting (keyword coloring, indentation, XML escaping), excerpt extraction around a line, the `"<module>"`-func-name escaping regression (Phase 9), a real generated PDF's byte signature and size, zero-findings/no-certificate/missing-source-file/missing-output-dir edge cases |
-| `test_eval_metrics.py` | 10 | Oracle accuracy against real fixtures, corpus label distribution by CWE/outcome, score-frame joining and abstention-dropping, separation metrics on well-separated and deliberately-inverted synthetic scores, `scan_ground_truth_eval` precision/recall/F1/accuracy incl. same-unit-multiple-findings and module-level-finding cases |
-| `test_ingest.py` | 9 | Function/method/nested-function extraction, lineno/hash correctness, hash stability, syntax-error and unreadable-file reporting, `venv` skip, `.gitignore` honoring, missing-path error |
-| `test_artifacts.py` | 8 | Model/calibration save-load round trips, missing-file error messages, uncertified (`None` `t_hat`) case, version-guard rejection on `ranker_id` mismatch |
-| `test_report_json_sarif.py` | 6 | JSON round-trips with correct counts, null certificate when unscored, SARIF 2.1.0 shape, severity-to-SARIF-level mapping, POSIX-path locations, one rule per tracked CWE plus UNSPECIFIED |
-| `test_generation_resume.py` | 6 | Checkpoint write/read, resume-skips-completed, partial-failure doesn't abort the batch |
-| `test_corpus.py` | 6 | Prompt bank loading, prompt/flavor/split shape |
-| `test_risk.py` | 5 | `empirical_risk`, Clopper-Pearson interval edge cases |
-| `test_ranker.py` | 5 | `R2Ranker` fit/score contract, safety-score orientation |
-| `test_ltt.py` | 5 | `calibrate_threshold` — monotonicity, perfect separation, zero-vulnerable-sample edge case |
-| `test_schemas.py` | 4 | `validate_dataframe` catches missing/extra columns and dtype mismatches |
-| `test_eval.py` | 4 | Cost-coverage frontier computation, generator-shift experiment |
-| `test_config.py` | 4 | Config loading, role-reuse (adjudicator-in-generators) rejection, split-ratio validation |
-| `test_report_terminal.py` | 4 | No-findings message, per-finding row rendering, corpus version shown without a provisional banner (removed 2026-09-02), certificate section omitted when unscored |
-| `test_report_accounting.py` | 5 | Zero LLM activity yields zero cost, per-call system-prompt overhead added correctly, calls-avoided combines auto-approved and cache hits, known-vs-unknown model pricing, always flagged as an estimate |
-| `test_report_remediation.py` | 3 | Correct hardcoded entry for each tracked CWE, manual-review fallback for `UNSPECIFIED` and for unrecognized input |
-| `test_env.py` | 3 | `.env` loading, required-vs-optional variable handling |
-| `test_dry_run.py` | 1 | Full simulated pipeline runs end-to-end without raising, and produces every artifact including `model.joblib`/`calibration.json` with the correct provisional flags |
+| `test_oracle_ground_truth.py` | 151 | Hand-verified labels for all three oracles, each pinning a defect found on real corpora: arity and statement-type cases for SQLi; Postgres idiom; multi-argument, allowlist, suffix-check, `int()`-cast, post-spawn-parse and module-level-demo-call cases for cmdi; every CWE-798 secret shape, each with an environment-sourced negative twin |
+| `test_oracles.py` | 24 | Core oracle contracts: `function_exists`, sandbox execution/timeout/exit-code capture, detection on fixtures, consensus rule v2 (including refusing to coerce a missing verdict), semgrep hit/clear on fixtures |
+| `test_dbapi_recorder.py` | 21 | Recording DB-API connection: paramstyle translation, statement capture through cursors and shortcuts, splice-vs-bound detection |
+| `test_corpus.py` | 17 | Prompt bank loading and shape: 60 groups per CWE, 24/24/12 splits, pinned signatures and arity spread, pinned CWE-798 literals, pilot selection |
+| `test_verifier.py` | 17 | JSON verdict parsing, degradation without a backend or on backend errors, caching, `Finding` mapping, `build_verifier_backend` |
+| `test_oracle_robustness.py` | 15 | The SQLi table-name abstention-defect class, plus the sink-shortcut correctness tests |
+| `test_scan_pipeline.py` | 15 | `Finding` validation, semgrep mapping, the no-execution invariant, gate partitioning, uncertified-threshold escalation, verifier paths, cache reuse, token accounting, `calibration` pass-through |
+| `test_artifacts.py` | 13 | Model/calibration round trips, missing-file errors, uncertified `t_hat`, version guard, the persisted frontier, `at_alpha` (certified, uncertified and never-computed alphas), pre-frontier files still loading |
+| `test_cli.py` | 13 | `info`/`calibrate`/`scan` via `CliRunner`, including `--alpha` with a certified alpha and refusing an uncertified one |
+| `test_eval_metrics.py` | 13 | Oracle accuracy on fixtures, label distribution, score frames, separation metrics, held-out split filtering (and refusing a split filter without split data), `scan_ground_truth_eval` |
+| `test_oracle_invocation.py` | 12 | Benign-value heuristics, the self-contained harness prelude, allowlist harvesting |
+| `test_pipeline_extract_code.py` | 11 | Code extraction from fenced, tagged, `<pre>`, `<details>` and unopened-fence completions |
+| `test_report_pdf.py` | 11 | Highlighting, excerpts, escaping regressions, a real PDF's signature and size, edge cases |
+| `test_generation.py` | 10 | `SimulatedBackend` shape/determinism, `stable_seed`, backend construction |
+| `test_generation_resume.py` | 9 | Checkpoint write/read, resume, partial failure, and (2026-10-04) regenerating reworded or unfingerprinted records while taking the split from the current prompt |
+| `test_ingest.py` | 9 | Function extraction, hashes, syntax/unreadable-file reporting, skips, missing-path error |
+| `test_report_json_sarif.py` | 6 | JSON round trips, null certificate, SARIF 2.1.0 shape and mappings |
+| `test_config.py` | 5 | Config loading, and that leftover `split_ratios` and `adjudicator` keys are ignored |
+| `test_relabel.py` | 5 | `relabel` row count and separation, `label_summary` shape |
+| `test_ltt.py` | 5 | `calibrate_threshold` monotonicity, separation and zero-vulnerable edge cases |
+| `test_risk.py` | 5 | `empirical_risk`, Clopper-Pearson edge cases |
+| `test_ranker.py` | 5 | `R2Ranker` fit/score contract, score orientation |
+| `test_report_accounting.py` | 5 | Cost accounting arithmetic, always flagged as an estimate |
+| `test_schemas.py` | 4 | `validate_dataframe` |
+| `test_eval.py` | 4 | Cost-coverage frontier, generator-shift experiment |
+| `test_report_terminal.py` | 4 | Terminal rendering |
+| `test_env.py` | 3 | `.env` loading |
+| `test_report_remediation.py` | 3 | Remediation entries per CWE |
+| `test_dry_run.py` | 1 | Full simulated pipeline end to end |
 
 ## 8 · Known risks & open questions
 
@@ -1516,3 +1521,174 @@ fine — it is now simply ignored, and a test pins that.
 **Status:** prompt bank `SOLID` as a structure; its yield is `PROVISIONAL`
 until the pilot run measures it. The projections above are extrapolations
 from 516 samples, not results.
+
+### 12.8 · Pilot corpus (2026-09-14, reviewed 2026-10-04)
+
+The teammate's pilot (`origin/corpus/pilot`, commit `27b4598`) has 107 of
+108 samples: groups 001–003 of each CWE × 3 flavors × 4 generators, with
+one codellama sample missing. Full review: `docs/PILOT_REVIEW.md`.
+
+Labelled with the oracles as they stood at `7583347`:
+`python scripts/relabel.py --generations data/runs/pilot/generations.parquet --out-dir data/runs/pilot_labeled`
+
+| Gate (plan Task 9) | Threshold | Result |
+|---|---|---|
+| Abstention | < 10% | 9.3% |
+| Vulnerable flavor → VULN | ≥ 35% | 80.6% (29/36) |
+| near_miss / neutral → VULN | 0 | 0 / 71 |
+| Every generator ≥ 1 VULN | yes | min 5 (deepseek) |
+| Unique code | > 90% | 100% |
+
+Every gate passed, and `starcoder2`'s replacement, `codegemma`, was the
+strongest generator (9/9). Reading all 17 non-ideal samples by hand found
+three oracle problems, all fixed in 12.9: the credentials oracle missed
+secrets in dict values, in positional `.login()` arguments, and passed via
+a local variable (3 of 12 CWE-798 vulnerable samples, all labelled SAFE).
+Allowlist-validated near-miss code abstained for every generator. Two
+codellama output wrappers defeated `extract_code`.
+
+### 12.9 · The full corpus, a resume defect, and the second oracle round (2026-10-04)
+
+**What arrived.** `origin/corpus/real-540`, commit `54ab6e1`: 2,156 rows in
+`data/runs/real_540/generations.parquet`. The guide said
+`data/runs/real_2160/`, but the run was written into the directory that
+still held the September checkpoint.
+
+**The resume defect.** `run_generation` reused any checkpointed record
+whose `sample_id` matched. That id hashes prompt id + generator only, not
+the prompt's wording or split. So the run silently reused September's
+answers for groups 001–015 from the three generators the runs share:
+**404 rows byte-identical to the September corpus.** 78 of them answer
+CWE-798 prompts that have been reworded since (the pinned-literal change
+in 12.7), and 189 carry a split that has been reassigned since. Fixed in
+`generation/harness.py`: every checkpoint record now stores
+`prompt_fingerprint` (SHA-256 of the wording), resume reuses a record
+only when it matches, and the split always comes from the current prompt.
+Legacy records with no fingerprint are regenerated. Three tests in
+`tests/test_generation_resume.py` pin this.
+
+**The repair.** `scripts/repair_real_2160.py` (reproducible: it reads the
+September corpus and the September prompt bank from git). It drops the 78
+stale rows, re-derives every split from the bank, and writes a
+fingerprinted checkpoint so the 82 missing samples (78 + 4 generation
+failures) can be topped up by resuming. That gives 2,078 usable rows.
+**Decision (2026-10-04):** assume the top-up never arrives, and make the
+corpus symmetric across generators instead. `--symmetric` keeps only
+prompts answered by all four models and drops 38 more rows, leaving
+**2,040 rows = 510 prompts × 4 generators**. Without this, the gaps
+cluster in CWE-798 groups 001–015 for three of the four models, which
+skews the per-generator shift experiment. The rows are missing because
+prompts were reworded, not because of anything about the code, so
+dropping them does not bias the miss-rate.
+
+**Second oracle round**, each change test-first, measured by relabelling:
+
+- *CWE-798.* On the full corpus, 51 of 60 vulnerable-flavor samples
+  labelled SAFE contained the pinned secret verbatim. They were in shapes
+  the oracle never reached: bytes literals and `.encode()`, (user,
+  password) tuples, `set_config("license_key", ...)` pairs, the trailing
+  password of connect/auth calls, names like `routing_key`/`X-Routing-Key`,
+  passwords in URLs or connection strings, webhook URLs, vendor key
+  prefixes, and secrets returned from `get_jwt_secret()`. All were added,
+  each with an environment-sourced negative twin. Guard: against the
+  oracle at `7583347`, every changed CWE-798 verdict across all three
+  corpora moved False → True, with none moving toward SAFE.
+  One over-tightening was caught and reverted: treating the bare word
+  "password" as a placeholder everywhere un-flagged
+  `ftp.login("username", "password")` (3 real-540 samples). It is now a
+  template word only inside URL and connection-string matches.
+- *CWE-78.* A written sentinel is now VULNERABLE unconditionally. Code
+  that parses the command's output (`int(out.split()[0])`) raised after
+  the payload had run, and that used to read as no evidence. Generated
+  code now runs inside a guard (`invocation.guarded_exec_source`), so a
+  crashing module-level demo call no longer kills the harness. Payloads
+  carry the code's own required suffix or prefix
+  (`invocation.harvest_affixes`).
+- *Both dynamic oracles.* The control run tries benign values harvested
+  from the code's own allowlists and suffix checks, then a type flip
+  (`benign_vectors`). This also exposed real injection beside an
+  allowlisted parameter (`e5ce81d4-0`, a CWE-89 near-miss whose `keyword`
+  is f-string-spliced; it used to abstain).
+- *`extract_code`.* Fallbacks for `<details>` blocks and an unopened
+  closing fence. Across all 2,701 real samples this changed 16
+  extractions, none of which had parsed before; 15 now parse.
+
+**Results** (`python scripts/relabel.py --generations <corpus> --out-dir <dir>`):
+
+| Corpus | Measure | Earlier relabel¹ | Final |
+|---|---|---|---|
+| 2,078 (repaired) | abstention | 10.1% | **6.5%** |
+| | `n_vuln_calib` | 192 | **212** |
+| | CWE-798 vulnerable → VULN | 129 / 195 | **177 / 195** |
+| | near_miss / neutral → VULN | 3 | 3 (all checked by hand: real) |
+| real-540 (516) | abstention | 19.2% | 14.1% |
+| pilot (107) | abstention | 9.3% | 0% |
+
+¹ For the 2,078 corpus: its first relabel, which already had the 12.8 fixes. For real-540 and the pilot: the oracles at `7583347`.
+
+The three safe-flavor VULN labels are code the model really wrote
+vulnerable despite a safe prompt: `e5ce81d4-0` above, plus two CWE-798
+near-misses that hardcode a meeting passcode (`"password": "123456"`).
+
+**Still open.** CWE-78 near-miss abstains on 76/239 (32%). The safe code
+validates input in ways no harvested value satisfies: an existing
+destination directory, a path under a caller-supplied base directory, an
+integer size range. These are lost hard negatives, not wrong labels. The
+remaining CWE-798 misses are 3 vendor constructors taking the key
+positionally (`PagerDuty("...")`, Algolia `Client(app, key)`), left alone
+because catching a bare positional string needs guesswork that would risk
+false positives.
+
+**Removed as unused**, after confirming that nothing reads it: the label
+adjudicator (config key, `GeminiBackend`, the `semgrep_hit AND
+adjudicator_verdict` consensus fallback, and both labelled-schema
+columns). The fallback could never fire, because `label_row` abstains
+before consulting consensus. Also removed: the never-constructed
+`OpenRouterBackend` and research-side `GroqBackend`, and the dead
+`_shannon_entropy`. Labelling no longer runs semgrep, which was most of
+its runtime.
+
+**Also changed:** the held-out ranker AUC is reported beside the
+full-corpus figure (`run_eval.py`). `codegate scan --alpha` is implemented
+from a frontier persisted in `calibration.json`, accepting only alphas LTT
+actually certified. `corpus_version` is a parameter instead of a
+hardcoded `"real-540"`. `train_from_pregenerated.py` requires `--out-dir`,
+because its default was `data/model/`.
+
+### 12.10 · First certified threshold on real data (2026-10-04), not yet promoted
+
+```
+python scripts/repair_real_2160.py --generations data/runs/real_2160/generations.as_received.parquet --out-dir data/runs/real_sym --symmetric
+python scripts/train_from_pregenerated.py data/runs/real_sym/generations.parquet --out-dir data/runs/real_sym_train --corpus-version real-2040-sym
+```
+
+2,040 samples (510 prompts × 4 generators), 6.7% abstention, 26.9% vulnerable
+among decided samples.
+
+| α | t̂ | coverage (calib) | n_vuln_calib |
+|---|---|---|---|
+| **0.05** | **0.828** | **48.9%** | 206 |
+| 0.10 | 0.776 | 56.4% | 206 |
+| 0.20 | 0.744 | 63.0% | 206 |
+| 0.30 | 0.698 | 69.3% | 206 |
+
+Checked independently from the saved scores: 4 of 206 vulnerable
+calibration samples score above t̂, and `binom.cdf(4, 206, 0.05) = 0.022 ≤ δ`.
+Generator shift: calibrating on three models and testing on the fourth
+holds for all four (realized risk 2.2%, 3.5%, 2.2%, 4.5% against α = 5%).
+Ranker ROC-AUC 0.891 on the held-out test split (0.926 including training
+data).
+
+**Not promoted to `data/model/`**, for two reasons that need a decision:
+
+1. *Held-out test split: realized miss rate 8.4% (9 of 107).* That alone is
+   not significant: P(≥ 9 | true rate 5%) = 0.088. But 7 of the 9 come
+   from two CWE-798 task groups (webhook HMAC secrets, signing-key bytes).
+   Those are shapes the labeller first recognised on 2026-10-04, and the
+   ranker scores them as ordinary crypto code.
+2. *Clustering.* The 206 vulnerable calibration samples come from only 67
+   prompts. Four models answering the same prompt are correlated, while
+   LTT's binomial test assumes independent draws, so the certificate is
+   somewhat optimistic. This is the same concern that ruled out
+   `samples_per_prompt > 1` (§12.7), in milder form. A task-group cluster
+   bootstrap puts the test-split miss rate between 0.9% and 18.4%.

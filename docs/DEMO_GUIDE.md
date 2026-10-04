@@ -131,7 +131,7 @@ uncertified is production-ready.
 
 | Question | Answer |
 |---|---|
-| How many tests? | 200, all passing, CI-verified on Python 3.11 and 3.13 |
+| How many tests? | 416, all passing (CI runs on Python 3.11 and 3.13) |
 | How many CWEs? | 3 — SQL injection, OS command injection, hardcoded credentials |
 | Precision without the verifier? | 0.50 on the demo app (semgrep alone catches everything, model gate over-escalates) |
 | Precision with the verifier? | 1.00 on the demo app, live-verified against Groq |

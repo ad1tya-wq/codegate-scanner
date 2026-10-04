@@ -460,6 +460,40 @@ away.
 
 ---
 
+# PART F — OPTIONAL TOP-UP (82 samples)
+
+**Only if you have an hour free. The project goes ahead without this.**
+
+The full run was written into `data/runs/real_540/`, which still held the
+September run's progress file. That made it reuse 404 old answers, 78 of
+them to prompts that have since been reworded. That's our code's fault, not
+yours, and it's fixed now: progress files record the exact prompt wording
+and won't reuse a stale answer again. A repaired progress file is on the
+`corpus/real-2160` branch. Resuming from it generates only the 82 samples
+still missing (about 30–60 minutes).
+
+```bash
+git fetch
+git checkout corpus/real-2160
+git pull
+python scripts/run_real.py --generate-only --out-dir data/runs/real_2160
+```
+
+You should see `[resume] 2078 sample(s) already complete` and
+`Planned samples: 2160`. When it finishes, send the file back as in Part E,
+committing on this same branch:
+
+```bash
+git add -f data/runs/real_2160/generations.parquet
+git commit -m "data: top up real_2160 to 2,160 samples"
+git push
+```
+
+**Always use the exact `--out-dir` shown.** Resume reads whatever progress
+file is in that folder.
+
+---
+
 # Troubleshooting
 
 **`could not connect to Ollama at http://localhost:11434`**

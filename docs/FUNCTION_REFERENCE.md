@@ -36,13 +36,14 @@ ONLINE (scanner, runs constantly, consumes artifacts):
 ## config.py
 
 ### `config.load_config(path: str = "config.yaml") -> CodeGateConfig`
-**Does:** Reads `config.yaml`, validates one cross-field invariant (the
-adjudicator model must not also appear in the generators list), and returns
-an immutable `CodeGateConfig` built from the raw YAML. A `split_ratios`
-key was also parsed and validated here until 2026-09-14; it was read by
-nothing, since splits are assigned per task group by the `split:` key in
-each prompt YAML. An old config still carrying the key loads fine — it is
-simply ignored.
+**Does:** Reads `config.yaml` and returns an immutable `CodeGateConfig`
+built from the raw YAML (alpha, delta, seed, CWEs, flavors, generators,
+verifier, samples/prompts per CWE, paths). Two keys used to be parsed here
+and read by nothing, and both are now ignored if an old config still
+carries them. `split_ratios` (removed 2026-09-14): splits come from each
+task group's `split:` key in the prompt YAML. `adjudicator` (removed
+2026-10-04): the label adjudicator was declared and checked against the
+generator list, but never called.
 **Talks to:** Called by `cli.py::calibrate` and `cli.py::scan` (to look up
 the verifier model name), and by every entry-point script
 (`scripts/run_real.py::main`, `scripts/run_pipeline_dry_run.py::main`,
@@ -161,9 +162,11 @@ optional `research` extra, so a plain `pip install -e .` must not crash on
 every `codegate` invocation just because `calibrate` needs it.
 
 ### `cli.scan(path, format, output, no_llm, alpha, model_dir, config) -> None`
-**Does:** Validates `--format`, rejects `--alpha` (not yet implemented —
-overriding the certified threshold requires recomputing it from the
-calibration trace, deferred), optionally builds a verifier backend from
+**Does:** Validates `--format`. If `--alpha` is given, loads the
+calibration and checks that LTT certified a threshold at exactly that
+alpha (`Calibration.at_alpha`) *before* scanning. On a miss it exits with
+code 2 and lists the certified alphas; it never interpolates. Then it
+optionally builds a verifier backend from
 the configured verifier model, runs the scan, and renders the result in
 the requested format (terminal/json/sarif/pdf) — writing to `--output` or
 an appropriate default (stdout for json/sarif, `codegate_report.pdf` for
@@ -247,10 +250,28 @@ presently unexercised by the pipeline.
 
 Ground-truth labelers for the OFFLINE research corpus: two dynamic
 (detonation-based) oracles for CWE-89/CWE-78, one static oracle for
-CWE-798, a sandbox executor they share, an AST helper, a consensus-voting
-rule that combines oracle output with semgrep/adjudicator signal, and the
-semgrep wrapper itself (used by both this package's consensus step and,
-separately, the ONLINE scanner's static pre-pass).
+CWE-798, the shared machinery the dynamic pair runs on (a sandbox
+executor, a signature-aware invocation helper, a recording DB-API
+connection), an AST helper, the consensus rule that turns an oracle verdict
+into a label, and the semgrep wrapper (used by the ONLINE scanner's static
+pre-pass and the OFFLINE semgrep baseline — not by labelling).
+
+How a dynamic oracle runs, end to end. The oracle assembles one Python
+script and hands it to `run_sandboxed`:
+
+```
+HARNESS_PRELUDE              (invocation.py: stub finder for absent imports,
+                              benign-value helpers, signature reader)
+[RECORDER_SOURCE]            (dbapi_recorder.py: SQLi only)
+guarded_exec_source(code)    (the generated code, exec'd inside a guard)
+harness                      (per-oracle: control run, payload runs, verdict print)
+```
+
+The harness first finds a *benign* argument vector that reaches a sink (the
+control run — positive evidence the code does what it looks like), then
+puts the payload into each parameter position in turn. A verdict of SAFE
+always rests on that positive evidence; no evidence is an abstention
+(`None`), never a SAFE.
 
 ### oracles/ast_utils.py
 
@@ -293,10 +314,12 @@ the timeout fires (after killing the process tree and doing a bounded reap
 so no zombie lingers). Documented as best-effort process-level isolation
 only (no network disable, no container, no read-only filesystem) — the
 docstring is explicit that this must be swapped for a real container
-sandbox before running against untrusted LLM-generated code at scale.
+sandbox before running against untrusted LLM-generated code at scale. Both
+oracles now pass the fully assembled script as `code` and an empty
+`harness`, with `timeout_s=15.0`.
 **Talks to:** Called by `oracles/sqli_oracle.py::check_sqli` and
-`oracles/cmdi_oracle.py::check_cmdi`, each with its own detonation harness
-appended to the target code. Calls `subprocess.Popen`, `_kill_process_tree`.
+`oracles/cmdi_oracle.py::check_cmdi`. Calls `subprocess.Popen`,
+`_kill_process_tree`.
 **Tech:** `subprocess`, `tempfile`, `pathlib.Path`, `sys`, `platform`.
 **Fits in:** OFFLINE — the shared execution engine both dynamic oracles
 detonate code through. Explicitly never used by the ONLINE scanner (see
@@ -305,6 +328,157 @@ never execute it).
 
 *(`SandboxResult` is a frozen dataclass — `stdout`/`stderr`/`returncode`/
 `timed_out` — no methods.)*
+
+### oracles/invocation.py
+
+Shared by both dynamic oracles. Split in two halves: functions that run
+**in this process** (static analysis of the generated code, results
+embedded into the harness as literals), and `HARNESS_PRELUDE`, a source
+string that runs **inside the sandbox subprocess**, which has no import
+path back to this repo.
+
+#### `oracles.invocation.benign_value_for(param_name: str) -> str | int`
+**Does:** A type-plausible, harmless argument chosen from a parameter's
+name: `"name"` for column-like names (`sort_column`, `order_by`),
+`"2024-01-01"` for date-like names, `1` for numeric-looking names
+(`user_id`, `width`, `port`), otherwise `"alice"`. Order matters — the more
+specific hint wins (`start_date` is a date, not a number).
+**Talks to:** Its sandbox twin (same body, inside `HARNESS_PRELUDE`) is
+called by `benign_vectors`. The in-process copy exists for tests.
+**Tech:** none — substring checks against `NUMERIC_HINTS`, `DATE_HINTS`,
+`COLUMN_HINTS`.
+**Fits in:** OFFLINE — lets a multi-argument function be invoked at all.
+The original harnesses called `f(conn, payload)` / `f(payload)` with fixed
+arity and abstained on ~44% of the dynamic prompt bank.
+
+#### `oracles.invocation.takes_connection(param_names: list[str]) -> bool`
+**Does:** Whether the first parameter is named like a database connection
+(`conn`, `db`, `cursor`, ...).
+**Talks to:** Sandbox twin used by the SQLi harness to decide which
+parameters are free for payloads.
+**Tech:** none.
+**Fits in:** OFFLINE — SQLi invocation.
+
+#### `oracles.invocation.harvest_allowlist_values(code: str) -> list[str]`
+**Does:** Collects up to 12 short identifier-like strings from the code's
+set/list/tuple literals and dict keys — where allowlists live
+(`{"png", "jpg"}`, `WHITELIST = {"products": ...}`). Returns `[]` for
+unparseable code.
+**Talks to:** Called by `benign_candidates`. Calls `ast.parse`, `ast.walk`.
+**Tech:** `ast`, `re`.
+**Fits in:** OFFLINE — without it, code that validates against an allowlist
+rejects the name-based guess on every call, never reaches its sink, and
+abstains (all four generators, on two of six dynamic near-miss groups in the
+pilot). It also hid injection *beside* an allowlisted parameter.
+
+#### `oracles.invocation.harvest_affixes(code: str) -> tuple[list[str], list[str]]`
+**Does:** The (prefixes, suffixes) the code checks with
+`.startswith(...)` / `.endswith(...)`, including tuple arguments.
+**Talks to:** Called by `benign_candidates` (to build `"alice.zip"`,
+`"https://alice"`) and by `cmdi_oracle.check_cmdi` (to build payloads that
+carry the expected suffix or prefix).
+**Tech:** `ast`, `re`.
+**Fits in:** OFFLINE — suffix checks caused 37 CWE-78 near-miss abstentions
+in the full corpus, and made injection behind such a check undetectable.
+
+#### `oracles.invocation.benign_candidates(code: str) -> list`
+**Does:** The harvested values the harness may try as benign arguments:
+allowlist members plus affixed fillers.
+**Talks to:** Called by `check_sqli` (via `_build_source`) and
+`check_cmdi`; the list is embedded into the harness as a literal. Calls
+`harvest_allowlist_values`, `harvest_affixes`.
+**Tech:** none.
+**Fits in:** OFFLINE — feeds `benign_vectors`.
+
+#### `oracles.invocation.guarded_exec_source(code: str) -> str`
+**Does:** Returns source that runs the generated code via
+`exec(compile(...), globals())` inside `try/except BaseException`
+(re-raising only `KeyboardInterrupt`).
+**Talks to:** Called by `cmdi_oracle.check_cmdi` and
+`sqli_oracle._build_source` when assembling the sandbox script.
+**Tech:** `repr` embedding; `compile`/`exec` at sandbox runtime.
+**Fits in:** OFFLINE — models often leave a demo call at module level
+(`scan_host("example.org", 80)`). Inlined, an exception there killed the
+script before the harness ran and the sample abstained. The function is
+defined before the demo line runs, so after the guard it can still be
+judged. Also makes `from __future__` imports legal again, since the code is
+compiled on its own.
+
+**Inside `HARNESS_PRELUDE` (runs in the sandbox subprocess):**
+
+- `_install_missing_module_stubs()` — appends a `sys.meta_path` finder that
+  returns a permissive stub module for any import the labelling machine
+  lacks (`psycopg2`, `mysql.connector`), so a missing driver doesn't abort
+  the script before the function is even defined. Stub classes subclass
+  `Exception` so `except psycopg2.Error:` is legal; stub modules carry
+  `__path__` so dotted imports resolve. The finder is appended last, so real
+  modules always win, and it refuses every name in `NEVER_STUB`
+  (`subprocess`, `os`, `sqlite3`, ...): stubbing a real sink would turn an
+  injectable sample into a silent false SAFE.
+- `benign_value_for(param_name)` — the sandbox twin of the function above.
+- `positional_params(fn)` — the function's positional parameters via
+  `inspect.signature`, or `[]` if it has no readable signature.
+- `takes_connection(param_names)` — the sandbox twin of the function above.
+- `benign_vectors(params, allowlist_values)` — a generator of benign
+  argument vectors to try in order: the name-based guess; then each
+  harvested value in each position; then a type flip (`1` / `"alice"`) in
+  each position, for code that does `int(column)` on a parameter the name
+  heuristic took for a column name. Vulnerable code reaches its sink on the
+  first vector, so the extra tries only cost anything for code that
+  validates its input.
+
+### oracles/dbapi_recorder.py
+
+A recording DB-API connection the SQLi harness hands to the generated
+function. It captures the SQL string each `execute()` is given, then runs it
+against a real in-memory SQLite database. Stdlib only; its own source is
+exported as `RECORDER_SOURCE` so the harness can prepend it in the sandbox.
+
+#### `oracles.dbapi_recorder.translate_paramstyle(sql: str, params) -> str`
+**Does:** Rewrites Postgres/MySQL placeholders (`%s` → `?`,
+`%(name)s` → `:name`) so a parameterized statement can run on SQLite.
+Leaves the SQL untouched when there are no parameters: a `%s` left in the
+string then came from the code's own `%` formatting, which is the injection
+being looked for. Respects `%%` escapes.
+**Talks to:** Called by `RecordingCursor.execute`/`executemany`.
+**Tech:** `re`.
+**Fits in:** OFFLINE — lets Postgres-idiom samples execute instead of
+erroring out.
+
+#### `class oracles.dbapi_recorder.RecordingCursor`
+**Does:** Wraps a real `sqlite3.Cursor`. `execute`, `executemany` and
+`executescript` record the (SQL, parameters) pair on the shared
+`SqlRecorder`, then try the real execution and swallow its errors (the
+recording is what matters). `fetchone`/`fetchall`/`fetchmany`, iteration,
+the context-manager protocol, and `rowcount`/`lastrowid`/`description` all
+delegate to the real cursor.
+**Talks to:** Created by `RecordingConnection.cursor`.
+**Tech:** `sqlite3`.
+**Fits in:** OFFLINE — the observation point for cursor-style code.
+
+#### `class oracles.dbapi_recorder.SqlRecorder`
+**Does:** Collects `statements` (SQL, parameters) and an `errors` count for
+one invocation. `observed` is true once any SQL was issued.
+`payload_was_spliced(payload)` is true when the payload appears in any
+recorded SQL *string*. A bound value is passed separately and never appears
+there, whatever the paramstyle, so the check is exact.
+**Talks to:** Created per invocation by the SQLi harness's `_invoke`; read
+by the harness to decide the verdict.
+**Tech:** none.
+**Fits in:** OFFLINE — this is the injection test itself.
+
+#### `class oracles.dbapi_recorder.RecordingConnection`
+**Does:** Wraps a real `sqlite3.Connection`. `cursor(**kwargs)` returns a
+`RecordingCursor` (driver-specific kwargs such as `cursor_factory` are
+ignored), `execute*` shortcuts record too, `commit`/`rollback` delegate,
+`close()` is a no-op so the harness can reuse the fixture, and any other
+attribute passes through.
+**Talks to:** Instantiated by the SQLi harness and passed to the generated
+function as its `conn` argument.
+**Tech:** `sqlite3`.
+**Fits in:** OFFLINE — it replaced a row-count heuristic and then a SQLite
+trace callback. Both required SQLite to accept the statement, which lost
+every Postgres-idiom sample.
 
 ### oracles/sqli_oracle.py
 
@@ -321,27 +495,36 @@ first check. Calls nothing else — a plain substring scan.
 ("safe", not "unknown") for code that plainly can't touch a database,
 instead of needlessly discarding a valid negative sample as an abstention.
 
+#### `oracles.sqli_oracle._build_source(code: str, function_name: str) -> str`
+**Does:** Assembles the sandbox script: `import sqlite3`, the recorder
+source, `HARNESS_PRELUDE`, the guarded generated code, then the harness
+template filled with the fixture (20-column tables under every table name
+a model plausibly picks, two rows each), the payload
+(`nonexistent' OR '1'='1`), the harvested benign candidates, and the
+function name. The harness runs a control run over `benign_vectors` until
+SQL is observed, then injects the payload into each free parameter in
+turn and prints `CODEGATE_VERDICT=VULNERABLE|SAFE|NOEVIDENCE`.
+**Talks to:** Called only by `check_sqli`. Calls `guarded_exec_source`,
+`benign_candidates`.
+**Tech:** string templating.
+**Fits in:** OFFLINE.
+
 #### `oracles.sqli_oracle.check_sqli(code: str, function_name: str) -> bool | None`
-**Does:** The CWE-89 dynamic oracle. If `has_sql_sink` is `False`, returns
-`False` immediately (confidently safe). Otherwise, if the named function
-doesn't exist, returns `None` (abstain — no evidence). Otherwise builds an
-in-memory SQLite fixture (a union of every plausible table name a model
-might pick — `users`, `accounts`, `t`, etc. — so the harness doesn't fail
-just because the model chose an unexpected table name) and detonates the
-function with a classic `' OR '1'='1` payload via `run_sandboxed`. Returns
-`True` if the payload widened the result set beyond a legitimate
-single-user lookup (the injection "fired"), `False` if the function ran
-but neutralized it, and `None` if the sandbox timed out or the function
-raised before printing evidence.
-**Talks to:** Called by `research/pipeline.py::label_row` (in production,
-for every `CWE-89` sample, trying each candidate function name in turn)
-and `research/eval/metrics.py::oracle_accuracy_on_fixtures` (against the
-hand-labeled fixtures). Calls `has_sql_sink`,
-`oracles/ast_utils.py::function_exists`, `oracles/sandbox.py::run_sandboxed`.
-**Tech:** stdlib `sqlite3` (only inside the generated harness template, not
-imported by this module directly).
-**Fits in:** OFFLINE — the ground-truth labeler for CWE-89 samples in the
-research corpus.
+**Does:** The CWE-89 dynamic oracle. Returns `False` immediately when
+`has_sql_sink` is false, `None` when the function is absent, otherwise runs
+the `_build_source` script in the sandbox (15 s). `True` when the payload
+reached an executed statement as query *text* (the definition of SQL
+injection); `False` only when SQL was observed and the payload never
+reached it as text; `None` on timeout or no observation. Statement-type
+independent: it catches DELETE/UPDATE/INSERT/ORDER BY injection, and no
+longer calls a parameterized `SELECT COUNT(*)` vulnerable.
+**Talks to:** Called by `research/pipeline.py::label_row` (for every
+`CWE-89` sample, trying candidate function names in turn) and
+`research/eval/metrics.py::oracle_accuracy_on_fixtures`. Calls
+`has_sql_sink`, `ast_utils.function_exists`, `_build_source`,
+`sandbox.run_sandboxed`.
+**Tech:** `sqlite3` (inside the sandbox only).
+**Fits in:** OFFLINE — the ground-truth labeler for CWE-89.
 
 ### oracles/cmdi_oracle.py
 
@@ -358,77 +541,115 @@ nothing else.
 code that can't plausibly invoke a shell.
 
 #### `oracles.cmdi_oracle.check_cmdi(code: str, function_name: str) -> bool | None`
-**Does:** The CWE-78 dynamic oracle. If `has_shell_sink` is `False`,
-returns `False` immediately. If the function doesn't exist, returns
-`None`. Otherwise detonates the function with a shell-metacharacter
-payload (`127.0.0.1 & echo pwned > <sentinel file>`) via `run_sandboxed`
-and checks whether the sentinel file was created — proof the payload
-reached a real shell. Uses `&` rather than `;` as the separator
-deliberately, so the same payload works identically whether the sandboxed
-code's `shell=True` call runs through POSIX sh or Windows `cmd.exe`.
-Returns `None` if the sandbox timed out or the function errored before
-confirming it ran.
+**Does:** The CWE-78 dynamic oracle. Payload:
+`127.0.0.1 & echo pwned > <sentinel file>` (`&` sequences commands in both
+`cmd.exe` and POSIX sh), plus affixed variants when the code checks a
+suffix or prefix (`... & echo cg.zip`, `https://...`). The harness defines
+`_reached_a_spawn(args)`, which calls the function and counts it as having
+reached a process spawn if it returns normally *or* raises
+`FileNotFoundError`. That exception only happens on the `shell=False`
+path, because a shell always exists, so it is SAFE evidence. The harness
+runs the control run over `benign_vectors`, then each payload in each
+position, and prints `CODEGATE_DONE` or `CODEGATE_NOEVIDENCE`. Verdict
+order matters: **a written sentinel is `True` unconditionally**, because
+it is direct proof. Code that parses the command's output afterwards
+(`int(output.split()[0])`) raises after the payload has run, and that used
+to read as "no evidence". Then timeout → `None`, no `CODEGATE_DONE` →
+`None`, otherwise `False`.
 **Talks to:** Called by `research/pipeline.py::label_row` (for every
 `CWE-78` sample) and `research/eval/metrics.py::oracle_accuracy_on_fixtures`.
-Calls `has_shell_sink`, `oracles/ast_utils.py::function_exists`,
-`oracles/sandbox.py::run_sandboxed`.
+Calls `has_shell_sink`, `ast_utils.function_exists`, `harvest_affixes`,
+`benign_candidates`, `guarded_exec_source`, `sandbox.run_sandboxed`.
 **Tech:** `tempfile`, `uuid`, `pathlib.Path`.
-**Fits in:** OFFLINE — the ground-truth labeler for CWE-78 samples in the
-research corpus.
+**Fits in:** OFFLINE — the ground-truth labeler for CWE-78.
 
 ### oracles/creds_oracle.py
 
-#### `oracles.creds_oracle._shannon_entropy(s: str) -> float`
-**Does:** Computes the Shannon entropy (bits per character) of string `s`,
-used as a crude randomness signal to distinguish a plausible secret
-(`"Sup3rSecretPassw0rd!"`, high entropy) from an obviously non-secret
-literal (`"changeme"`, low entropy — though that case is also caught
-separately by the placeholder-marker check).
-**Talks to:** Called only by `check_creds` in this same module, twice (once
-per literal-collection loop). Calls nothing else — pure math.
-**Tech:** `math.log2`.
-**Fits in:** OFFLINE — a scoring primitive inside the static CWE-798
-oracle.
+#### `oracles.creds_oracle.check_creds(code: str) -> bool | None`
+**Does:** The CWE-798 static oracle (no execution). Returns `None` when the
+code doesn't parse (an abstention, not a clearance). Otherwise returns
+`True` when a *secret literal* reaches any of these:
+- an assignment, annotated assignment, attribute (`self.api_key`) or
+  subscript (`headers["Authorization"]`) whose name is secret-like;
+- a secret-named keyword argument or dict key (header-style names such as
+  `X-Routing-Key` are normalised first);
+- a `(user, password)` 2-tuple bound to `auth`/`credentials`/`creds` or
+  passed as `auth=`/`basic_auth=`/`http_auth=`;
+- the password slot of a known credential call (`.login(u, pw)`,
+  `HTTPBasicAuth`, `ftplib.FTP(h, u, pw)`, `set_password(pw)`), or the
+  last positional argument of any call named like
+  `login|auth|credential|connect|bind` with two or more positional args;
+- a secret-named string followed by a literal in any call
+  (`set_config("license_key", "...")`, `os.environ.get("JWT_SECRET",
+  "...")`, the hardcoded-fallback case);
+- the return value of a secret-named function (`get_jwt_secret`,
+  `get_encryption_key`);
+- a secret-named parameter's default value.
 
-#### `oracles.creds_oracle.check_creds(code: str) -> bool`
-**Does:** The CWE-798 static oracle (no dynamic execution). Walks the AST
-looking for string-literal assignments, keyword arguments, and default
-parameter values whose target name matches a secret-ish pattern
-(`password`, `api_key`, `token`, `credential`, etc.). For each candidate,
-skips obvious placeholders (`"changeme"`, `"xxx"`, `"<..."`, etc.) and
-flags it as a hardcoded credential if the literal's Shannon entropy exceeds
-a threshold (3.0 for assignments/kwargs, 2.5 for default-arg literals) or
-it matches a known key-shape regex (an AWS access-key-id pattern or a
-40-char base64-shaped string). Returns `False` on a syntax error.
+"Reaches" means directly as a literal (str, bytes, a constant f-string,
+`"...".encode()`) or one hop through a local variable. Finally, a
+name-independent sweep over every non-docstring literal flags unambiguous
+shapes: vendor key prefixes (AWS `AKIA`, Stripe `sk_live_`, GitHub `ghp_`,
+SendGrid `SG.`, `whsec_`, `npm_`, Mailgun `key-`, Slack `xox?-`), Slack and
+Discord webhook URLs, Sentry-style DSN keys, a password in a URL's userinfo
+(`scheme://user:PASS@host`), a secret in a query string (`?token=...`),
+and `password=`/`AccountKey=` pairs inside connection strings or SQL text.
 **Talks to:** Called by `research/pipeline.py::label_row` (as the
 `static_verdict` for every `CWE-798` sample) and
-`research/eval/metrics.py::oracle_accuracy_on_fixtures`. Calls
-`_shannon_entropy`.
-**Tech:** `ast`, `re`, `math`.
-**Fits in:** OFFLINE — the ground-truth labeler for CWE-798 samples. Also
-notable as the only oracle whose logic is structurally close to what the
-ONLINE scanner's static pre-pass does (AST pattern matching, no
-execution) — though the scanner itself uses semgrep rules for this, not
-this function directly.
+`research/eval/metrics.py::oracle_accuracy_on_fixtures`. Calls the private
+helpers below.
+**Tech:** `ast`, `re`.
+**Fits in:** OFFLINE — the ground-truth labeler for CWE-798. Entropy is
+deliberately not used anywhere. The old `> 3.0` gate rejected five of nine
+realistic passwords (`hunter2`, `letmein`, ...), and real passwords are
+low-entropy by nature. History: on the full corpus this oracle first
+labelled 51 of 60 vulnerable-flavor samples SAFE even though the pinned
+secret was present verbatim. Each widening above was checked against every
+near-miss and neutral sample in three corpora, with no new false positives.
+
+Private helpers:
+- `_is_placeholder(literal)` — substring match against
+  `_PLACEHOLDER_MARKERS` (`changeme`, `example`, `your_`, `<`, ...).
+- `_is_secret_literal(value)` — strips an auth scheme (`Bearer `,
+  `Basic `), then requires length ≥ 6, no whitespace (rules out prose such
+  as `RuntimeError("API_KEY", "Set the API_KEY variable")`), not a bare
+  auth scheme (`bearer`, `basic`), and not a placeholder. The URL and
+  connection-string sweeps additionally reject bare template words
+  (`password`, `username`, ...), since `scheme://username:password@host`
+  is a template. In a credential slot, `login("u", "password")` still
+  counts: it hardcodes the password "password".
+- `_is_secret_name(name)` / `_is_auth_tuple_name(name)` — name tests
+  against `_SECRET_NAME_PATTERN` / `_AUTH_TUPLE_NAMES`.
+- `_as_text(value)` — decodes bytes literals.
+- `_target_name(target)` — the name a value is stored under: `x`,
+  `self.x`, or `d["x"]`.
+- `_call_name(func)` — `f` for `f(...)` and `obj.f(...)`.
+- `_literal_values(node)` — the string(s) an expression literally denotes
+  (str/bytes constant, `.encode()`, constant f-string, an f-string's
+  literal parts, a 2-tuple's second element), or `[]` if computed.
+- `_string_bindings(tree)` — every literal assigned to each plain name,
+  for one-hop resolution.
+- `_resolve(node, bindings)` — `_literal_values`, or the literals bound to a
+  name.
+- `_docstring_nodes(tree)` — docstring constants to skip in the shape
+  sweep (a key shape quoted in documentation is not a secret).
 
 ### oracles/consensus.py
 
-#### `oracles.consensus.consensus_label(cwe, semgrep_hit, dynamic_verdict, static_verdict, adjudicator_verdict) -> int`
-**Does:** Applies "consensus rule v1" to combine oracle/semgrep/adjudicator
-signal into a final binary label. For the two CWEs with a dynamic oracle
-(CWE-89, CWE-78): the dynamic verdict is authoritative when it returned
-one (not `None`); otherwise falls back to `semgrep_hit AND
-adjudicator_verdict`. For the static-only CWE (CWE-798): the static
-verdict is authoritative when present, same fallback otherwise. Raises
-`ValueError` for any CWE not in its known sets — treated as a
-ruleset/pipeline-drift bug, not silently defaulted.
-**Talks to:** Called by `research/pipeline.py::label_row`, as the final
-step turning per-sample oracle output into the `label` column. Calls
-nothing else.
-**Tech:** none beyond plain conditionals — no external libraries.
-**Fits in:** OFFLINE — the labeling policy that turns multiple oracle
-signals into the single ground-truth label the ranker is trained on and
-the LTT gate is calibrated against.
+#### `oracles.consensus.consensus_label(cwe, dynamic_verdict, static_verdict) -> int`
+**Does:** Rule v2. Returns the dynamic oracle's verdict for CWE-89/CWE-78
+and the static oracle's for CWE-798, as `1`/`0`. Raises `ValueError` for an
+unknown CWE, and for a `None` verdict. Callers must abstain before asking,
+so this function can never be where "no evidence" turns into a label.
+**Talks to:** Called by `research/pipeline.py::label_row`, after it has
+already returned `LABEL_ABSTAIN` for the no-verdict case. Calls nothing
+else.
+**Tech:** none.
+**Fits in:** OFFLINE — the labeling policy. Rule v1 also carried a
+`semgrep_hit AND adjudicator_verdict` fallback. It could never fire:
+`label_row` abstains first, and the adjudicator was never wired in (its
+verdict was hard-coded `False`). It was removed on 2026-10-04 after
+confirming nothing read it. The ranker trains on code alone.
 
 ### oracles/semgrep_oracle.py
 
@@ -439,7 +660,7 @@ CodeGate's local hand-written ruleset (`data/semgrep_rules/codegate_rules.yaml`)
 by default — chosen over the free community registry packs, which were
 verified empirically to produce zero findings on this project's raw-stdlib
 corpus. Parses the JSON output into a normalized `{"hit": bool,
-"findings": [...]}" shape (each finding: rule_id, severity, path,
+"findings": [...]}` shape (each finding: rule_id, severity, path,
 start_line, end_line, message). Degrades to `{"hit": False, "findings":
 [], "error": ...}` rather than raising if the binary is missing or times
 out, or if its output doesn't parse as JSON.
@@ -452,14 +673,14 @@ this same module. Calls `subprocess.run`, `json.loads`.
 **Does:** Runs semgrep against one in-memory code snippet by writing it to
 a temp file first. Used wherever the caller has synthetic code rather than
 a real file already on disk.
-**Talks to:** Called by `research/pipeline.py::label_row` (as the semgrep
-signal feeding `consensus_label`), `ranker/r0_semgrep_score.py::score_r0`
-(per-row, to build the R0 danger score), and
-`research/eval/metrics.py::oracle_accuracy_on_fixtures` (against the
-fixture files, read into memory first). Calls `_run_semgrep_cli`.
+**Talks to:** Called by `ranker/r0_semgrep_score.py::score_r0` (per-row,
+to build the R0 danger score) and
+`research/eval/metrics.py::oracle_accuracy_on_fixtures` (the semgrep
+baseline against the fixtures). No longer called during labelling. It only
+fed the adjudicator fallback removed from `consensus_label`, and was most
+of the labelling runtime. Calls `_run_semgrep_cli`.
 **Tech:** `tempfile`, `pathlib.Path`.
-**Fits in:** OFFLINE — semgrep-as-a-labeling-signal for the research
-corpus.
+**Fits in:** OFFLINE — the R0 baseline and the semgrep comparison column.
 
 #### `oracles.semgrep_oracle.run_semgrep_on_path(target: Path, ruleset_path: Path | None = None) -> dict`
 **Does:** Runs semgrep directly against a real file or directory already
@@ -576,19 +797,25 @@ contains a `def` — not just the first block found, because some models
 (codellama, observed in the real corpus) emit a second block that's a
 usage example rather than the implementation, and picking the wrong one
 would hand the oracle a function call instead of a function definition.
-Falls back to `raw` unchanged if no delimited block contains a `def`,
-which covers both a model that emits bare unwrapped code (starcoder2) and
-one that emits no usable code at all (a genuine non-answer that should
-abstain downstream rather than be forced into a false extraction). The
+If no well-formed delimiter holds a `def`, two codellama shapes from the
+pilot are tried: the body of an HTML `<details>` block (with
+`<summary>`/`<b>`/`<br>`-style tags stripped by name, so code such as
+`a<b and c>d` survives), and indented code followed by a closing fence that
+was never opened. Both are dedented. Measured across all 2,701 real
+samples, these fallbacks changed 16 extractions, none of which had parsed
+before; 15 now parse. Otherwise falls back to `raw` unchanged, which covers
+both a model that emits bare unwrapped code (starcoder2) and one that emits
+no usable code at all (a genuine non-answer that should abstain downstream
+rather than be forced into a false extraction). The
 module-level comment records the empirical motivation: 40.7% oracle
 abstention on the real 516-sample corpus before this existed, because
 `ast.parse` on raw prose-wrapped text raised `SyntaxError` and the dynamic
 oracles fell back to names real models essentially never use.
 **Talks to:** Called by `run_full_pipeline`, unconditionally (not
 branched on `is_simulated` — it's a no-op on `SimulatedBackend`'s already
-clean output, so one code path serves both). Calls nothing else — pure
-regex.
-**Tech:** `re`.
+clean output, so one code path serves both), and by `relabel`. Calls
+nothing else.
+**Tech:** `re`, `textwrap`.
 **Fits in:** OFFLINE — a generation-output cleanup step, between raw
 generation and oracle labeling.
 
@@ -603,17 +830,18 @@ models don't reliably use `SimulatedBackend`'s four template names
 **Tech:** `ast`.
 **Fits in:** OFFLINE — a labeling-time helper.
 
-#### `research.pipeline.label_row(row: pd.Series, use_semgrep_and_adjudicator: bool = False) -> dict`
+#### `research.pipeline.label_row(row: pd.Series) -> dict`
 **Does:** Runs the appropriate oracle(s) for one generated snippet and
 applies the consensus rule, returning one `labeled`-schema row. Builds a
 candidate function-name list (the real first-defined function name,
 if found, tried first, then the four simulated-template names as
 fallback) and tries each against the dynamic oracle for CWE-89/CWE-78
 until one returns a non-`None` verdict; for CWE-798 runs the static
-`check_creds` oracle directly. When `use_semgrep_and_adjudicator=True`
-(real runs), also runs semgrep for the consensus signal (the adjudicator
-verdict itself is left `False` — a Gemini-based adjudicator call was never
-wired in, per the code comment). Returns `LABEL_ABSTAIN` (`-1`) when no
+`check_creds` oracle directly. Output columns: `sample_id`, `cwe`,
+`label`, `dynamic_verdict`, `static_verdict`, `consensus_rule_version`
+(`semgrep_hit` and `adjudicator_verdict` were dropped on 2026-10-04 with
+the adjudicator; they were written and never read, and the per-row semgrep
+call was most of labelling's runtime). Returns `LABEL_ABSTAIN` (`-1`) when no
 oracle reached a verdict at all — the docstring is explicit this must
 never be silently treated as safe, since that's exactly what hid a real
 bug where 540/540 CWE-89 samples abstained (wrong table names) and were
@@ -622,14 +850,33 @@ all mislabeled safe before this distinction existed.
 directly by `tests/test_oracle_robustness.py`. Calls
 `_first_function_name`, `oracles/sqli_oracle.py::check_sqli`,
 `oracles/cmdi_oracle.py::check_cmdi`, `oracles/creds_oracle.py::check_creds`,
-`oracles/semgrep_oracle.py::run_semgrep` (conditionally), and
-`oracles/consensus.py::consensus_label`.
+and `oracles/consensus.py::consensus_label`.
 **Tech:** none directly beyond stdlib; delegates all real work to the
 oracle modules above.
 **Fits in:** OFFLINE — the "oracles label each sample" stage, applied
 per-row.
 
-#### `research.pipeline.run_full_pipeline(cfg, prompts, backends, is_simulated, out_dir, use_semgrep_and_adjudicator=False, checkpoint_path=None, pregenerated_df=None) -> dict`
+#### `research.pipeline.relabel(gen_df: pd.DataFrame) -> pd.DataFrame`
+**Does:** Re-runs the current oracles over an already-generated corpus:
+`extract_code` on every row, then `label_row`. Returns a fresh `labeled`
+frame.
+**Talks to:** Called by `scripts/relabel.py::main` and the tests. Calls
+`extract_code`, `label_row`.
+**Tech:** `pandas`.
+**Fits in:** OFFLINE — generation takes hours on a teammate's machine,
+labelling takes tens of minutes here. Every oracle change is measured by
+relabelling corpora we already hold, never by regenerating.
+
+#### `research.pipeline.label_summary(gen_df: pd.DataFrame, labeled_df: pd.DataFrame) -> pd.DataFrame`
+**Does:** CWE × flavor × verdict (`VULN`/`SAFE`/`ABSTAIN`) crosstab.
+**Talks to:** Called by `scripts/relabel.py::main`. Calls `pandas.crosstab`.
+**Tech:** `pandas`.
+**Fits in:** OFFLINE — the shape that makes an oracle defect visible: a
+safe flavor with VULN labels means a false positive (or a model ignoring
+its prompt, to be checked by hand), and a flavor with mass ABSTAIN means a
+harness that can't invoke the code.
+
+#### `research.pipeline.run_full_pipeline(cfg, prompts, backends, is_simulated, out_dir, checkpoint_path=None, pregenerated_df=None, corpus_version=None) -> dict`
 **Does:** The full OFFLINE orchestration: generate (or accept
 `pregenerated_df` and skip generation entirely) -> validate schema ->
 `extract_code` -> write `generations.parquet` -> `label_row` every row ->
@@ -639,8 +886,11 @@ exceeds 20% -> fit `R2Ranker` on the train split, score everyone -> write
 alphas (`compute_frontier`) bracketing the configured alpha -> plot it ->
 run `calibrate_threshold` at the configured operating point, persist its
 trace to `ltt_trace.csv` -> save the model and calibration together
-(`save_model`, `save_calibration`) tagged with `corpus_version` and
-`is_provisional` (provisional iff `is_simulated`) -> run a per-generator
+(`save_model`, `save_calibration`, the latter including the whole
+frontier so scan-time `--alpha` can look thresholds up) tagged with
+`corpus_version` (the caller's name for the corpus; `simulated-v2` or
+`real-unversioned` if none is given -- it used to be hardcoded `real-540`)
+and `is_provisional` (provisional iff `is_simulated`) -> run a per-generator
 holdout shift experiment (`run_shift_experiment`) for every generator with
 at least 2 generators and >0 vulnerable calibration samples -> plot and
 persist shift results. Returns a summary dict (`n_generated`, `vuln_rate`,
@@ -695,15 +945,33 @@ doesn't exist, or `TypeError` if the deserialized object isn't an
 **Fits in:** Shared — the model side of the artifact pair the ONLINE
 scanner reads at the start of every scan.
 
-#### `research.artifacts.save_calibration(result, path, corpus_version, is_provisional, ranker_id=R2Ranker.RANKER_ID) -> None`
+#### `research.artifacts.save_calibration(result, path, corpus_version, is_provisional, ranker_id=R2Ranker.RANKER_ID, frontier=None) -> None`
 **Does:** Builds a `Calibration` record from an `LTTResult` plus
 provenance fields (corpus version, provisional flag, ranker id, a fresh
-UTC timestamp) and writes it to `path` as indented JSON.
+UTC timestamp) and writes it to `path` as indented JSON. Given the
+`compute_frontier` DataFrame, it also stores one `{alpha, t_hat, coverage}`
+row per alpha (uncertified `t_hat` as `null`), which is what scan-time
+`--alpha` reads.
 **Talks to:** Called by `research/pipeline.py::run_full_pipeline`. Calls
 nothing else beyond `json.dumps` and `dataclasses.asdict`.
 **Tech:** `json`, `datetime` (`timezone.utc`).
 **Fits in:** OFFLINE — persists the certificate as
 `data/model/calibration.json`.
+
+#### `research.artifacts.Calibration.at_alpha(alpha: float) -> Calibration`
+**Does:** Returns this certificate restated at `alpha`: itself if `alpha`
+is the operating point, otherwise a copy carrying that alpha's own
+certified `t_hat` from `frontier`. Raises `UncertifiedAlphaError` (which
+carries `.certified`, the valid alphas) for any alpha LTT did not certify,
+including one never computed. It never interpolates, since an
+interpolated threshold carries no guarantee. `certified_alphas()` lists
+the alphas that have a threshold. `frontier` defaults to `[]`, so
+calibration files written before it existed still load and only answer for
+their own alpha.
+**Talks to:** Called by `cli.py::scan` (validation) and
+`scan/pipeline.py::_rank_and_gate` (applying the override).
+**Tech:** `dataclasses.replace`, `math.isclose`.
+**Fits in:** ONLINE — scan-time `--alpha`.
 
 #### `research.artifacts.load_calibration(path: Path) -> Calibration`
 **Does:** Loads and reconstructs a `Calibration` from JSON at `path`,
@@ -743,6 +1011,25 @@ flavor (`vulnerable`, `neutral`, `near_miss`) — with a deterministic
 generation is bypassed). Calls `yaml.safe_load`.
 **Tech:** `yaml` (PyYAML), `pathlib.Path`.
 **Fits in:** OFFLINE — the very first stage, "prompts."
+
+#### `research.corpus.prompts.task_group_of(prompt: Prompt) -> str`
+**Does:** The task-group id a prompt belongs to: its `prompt_id` minus the
+trailing flavor (`CWE-89-007-near_miss` → `CWE-89-007`).
+**Talks to:** Called by `select_pilot_prompts`.
+**Tech:** none.
+**Fits in:** OFFLINE — a task group (one task, three flavors) is the unit
+that splits and pilots operate on, never an individual prompt.
+
+#### `research.corpus.prompts.select_pilot_prompts(prompts: list[Prompt], per_cwe: int) -> list[Prompt]`
+**Does:** The first `per_cwe` task groups of *each* CWE, with all three
+flavors kept and bank order preserved. Raises `ValueError` if
+`per_cwe < 1`.
+**Talks to:** Called by `scripts/run_real.py::main` for
+`--pilot-per-cwe`. Calls `task_group_of`.
+**Tech:** none.
+**Fits in:** OFFLINE — `--limit N` takes the first N prompts overall, and
+the bank loads in file order (cmdi, creds, sqli), so a `--limit` pilot
+would have covered one CWE only.
 
 ### research/generation/backends.py
 
@@ -819,58 +1106,11 @@ returns `response["response"]`.
 **Fits in:** OFFLINE — the real generation backend used for producing the
 actual research corpus (`scripts/run_real.py`).
 
-**`class research.generation.backends.OpenRouterBackend`** — real backend:
-OpenRouter free-tier models via their OpenAI-compatible chat completions
-endpoint. Requires an API key. (`__init__` stores `name`/`model`/`api_key`.)
-
-#### `research.generation.backends.OpenRouterBackend.generate(self, prompt, seed) -> str`
-**Does:** POSTs a chat-completions request to
-`https://openrouter.ai/api/v1/chat/completions` with a single user message
-and the given seed, and returns the first choice's message content.
-**Talks to:** Not currently instantiated anywhere in `src/codegate` or
-`scripts/` — `config.yaml`'s generators today are all Ollama models, so
-this backend exists as an available option but has no current production
-caller. Calls `requests.post`.
-**Tech:** `requests`.
-**Fits in:** OFFLINE — an alternative real generation backend, unused by
-the current configuration.
-
-**`class research.generation.backends.GeminiBackend`** — real backend:
-Google Gemini free tier, intended specifically as the label adjudicator
-(never a code generator, so it never adjudicates its own output — see
-`config.py::load_config`'s role-reuse validation). Requires an API key.
-(`__init__` stores `name`/`model`/`api_key`.)
-
-#### `research.generation.backends.GeminiBackend.generate(self, prompt, seed) -> str`
-**Does:** POSTs to
-`https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
-with `prompt.task` as the content and the seed set in `generationConfig`,
-returning the first candidate's text.
-**Talks to:** Not currently instantiated anywhere in `src/codegate` or
-`scripts/` — `research/pipeline.py::label_row`'s `adjudicator_verdict` is
-hardcoded `False` because this call was never wired in (per the code
-comment). No production caller today.
-**Tech:** `requests`.
-**Fits in:** OFFLINE — reserved for the not-yet-wired-in adjudicator role.
-
-**`class research.generation.backends.GroqBackend`** — real backend: Groq
-free-tier inference via their OpenAI-compatible chat completions endpoint.
-Requires an API key. (`__init__` stores `name`/`model`/`api_key`. Distinct
-from `scan/verifier.py::GroqVerifierBackend`, which implements a different
-interface — `ask(code) -> str` for verification, not `generate(Prompt,
-seed) -> str` for corpus generation.)
-
-#### `research.generation.backends.GroqBackend.generate(self, prompt, seed) -> str`
-**Does:** POSTs a chat-completions request to
-`https://api.groq.com/openai/v1/chat/completions` with a single user
-message and the seed, returning the first choice's message content.
-**Talks to:** Not currently instantiated anywhere in `src/codegate` or
-`scripts/` as a *generation* backend — `config.yaml`'s generators are
-Ollama models. (Groq is used elsewhere, but only as the scan verifier via
-the separate `GroqVerifierBackend` class in `scan/verifier.py`.)
-**Tech:** `requests`.
-**Fits in:** OFFLINE — an alternative real generation backend, unused by
-the current configuration.
+*(`OpenRouterBackend`, `GeminiBackend` and `GroqBackend` were removed on
+2026-10-04. All three were API generators from before generation moved to
+Ollama, none was constructed anywhere, and `GeminiBackend` was the
+never-wired label adjudicator. The scan verifier's Groq client,
+`scan/verifier.py::GroqVerifierBackend`, is separate and unaffected.)*
 
 ### research/generation/harness.py
 
@@ -886,6 +1126,14 @@ the checkpoint, so a random id (the code comment notes this used to be
 **Fits in:** OFFLINE — generation-stage id assignment, load-bearing for
 resumability.
 
+#### `research.generation.harness.prompt_fingerprint(prompt: Prompt) -> str`
+**Does:** The first 16 hex digits of the SHA-256 of `prompt.task`, which
+identifies the exact wording a sample answered.
+**Talks to:** Called by `run_generation` (written into every checkpoint
+record, and compared on resume) and by `scripts/repair_real_2160.py`.
+**Tech:** `hashlib`.
+**Fits in:** OFFLINE — see `run_generation` for why this exists.
+
 #### `research.generation.harness._load_checkpoint(checkpoint_path: Path) -> dict[str, dict]`
 **Does:** Reads a JSONL checkpoint file into a `{sample_id: record}` dict,
 skipping any line that fails to parse as JSON (a half-written final line
@@ -899,7 +1147,15 @@ from an interrupted run — that sample simply regenerates).
 combination. If `checkpoint_path` is given, appends each successful
 sample to a JSONL file as it's produced and skips regenerating anything
 already present there — making a multi-hour Ollama run survive a dropped
-connection or Ctrl-C. A generation call that raises is logged to stderr
+connection or Ctrl-C. A checkpointed record is reused only if its
+`prompt_fingerprint` matches the current prompt's wording; the `split` is
+always taken from the current prompt, because the split belongs to the
+prompt, not the answer. A reworded prompt, or a legacy record with no
+fingerprint, is regenerated and counted in a `[resume] ... regenerated`
+message. Matching on `sample_id` alone used to be the rule, and on
+2026-10-04 it was found to have reused 404 answers from an older run in the
+same directory: 78 answered prompts that had since been rewritten, and 189
+carried a since-reassigned split. A generation call that raises is logged to stderr
 and skipped rather than aborting the whole run (so one bad sample out of
 hundreds doesn't cost all the others); skipped samples are absent from the
 checkpoint and retried on the next resume. Returns a `generations`-schema
@@ -907,10 +1163,10 @@ DataFrame.
 **Talks to:** Called by `research/pipeline.py::run_full_pipeline` (unless
 `pregenerated_df` was supplied, bypassing this entirely) and directly by
 `scripts/run_real.py::main` in its `--generate-only` mode. Calls
-`_load_checkpoint`, `_sample_id`,
+`_load_checkpoint`, `_sample_id`, `prompt_fingerprint`,
 `research/generation/backends.py::stable_seed`, and each backend's
 `.generate(...)`.
-**Tech:** `pandas`, `json`, `sys` (for stderr warnings).
+**Tech:** `pandas`, `json`, `hashlib`, `sys` (for stderr warnings).
 **Fits in:** OFFLINE — the "LLM generation -> code samples" stage.
 
 ### research/eval/frontier.py
@@ -952,24 +1208,26 @@ produced by `research/pipeline.py::label_row` has, simulated or real.
 **Tech:** `pandas`.
 **Fits in:** OFFLINE (eval).
 
-#### `research.eval.metrics.ranker_score_frame(labeled_df, scores_df) -> pd.DataFrame`
+#### `research.eval.metrics.ranker_score_frame(labeled_df, scores_df, generations_df=None) -> pd.DataFrame`
 **Does:** Joins a labeled corpus with a ranker's per-sample scores on
 `sample_id`, dropping abstentions (they were excluded from training and
 calibration upstream, so they shouldn't count as "safe" here either).
+Given `generations_df`, each row also carries its `split`. It is joined
+here rather than written into `scores_r2.parquet` so the `scores` schema
+stays the ranker's own contract.
 **Talks to:** Called by `scripts/run_eval.py::main`. Calls nothing else —
 a pandas merge.
 **Tech:** `pandas`.
 **Fits in:** OFFLINE (eval).
 
-#### `research.eval.metrics.ranker_separation_metrics(score_frame: pd.DataFrame) -> dict`
+#### `research.eval.metrics.ranker_separation_metrics(score_frame: pd.DataFrame, *, split: str | None = None) -> dict`
 **Does:** Computes ROC-AUC (against `1 - label`, since higher score means
-safer/class-0) plus mean score per class. The docstring carries an
-explicit caution: as currently fed (`labeled.parquet` + `scores_r2.parquet`
-directly, with no train/test split threaded through those files), this
-scores the ranker partly against samples it was trained on — on the small
-templated simulated corpus this reads as a suspiciously perfect AUC=1.0,
-a memorization signal rather than a generalization one, and is flagged
-as not to be quoted as "the ranker's accuracy" without that caveat.
+safer/class-0) plus mean score per class. `split="test"` restricts it to
+the held-out split, which is the figure to quote. Without a filter it
+includes the ranker's own training samples, a memorization figure kept
+only for comparison. It raises if a split is requested from a frame that
+has no `split` column, rather than returning the full-corpus number under
+a held-out name.
 **Talks to:** Called by `scripts/run_eval.py::main`. Calls
 `sklearn.metrics.roc_auc_score`.
 **Tech:** `sklearn.metrics.roc_auc_score`.
@@ -1187,8 +1445,9 @@ pattern match), `fix_hint` from the short built-in hint table.
 **Fits in:** ONLINE — the "static pre-pass" stage of the architecture
 diagram.
 
-#### `scan.pipeline._rank_and_gate(units: list[Unit], model_dir: Path) -> tuple[list[tuple[Unit, float]], int, int, Calibration | None]`
-**Does:** Loads the model+calibration pair, scores every unit, and
+#### `scan.pipeline._rank_and_gate(units: list[Unit], model_dir: Path, alpha: float | None = None) -> tuple[list[tuple[Unit, float]], int, int, Calibration | None]`
+**Does:** Loads the model+calibration pair (restated via
+`Calibration.at_alpha` when `alpha` is given), scores every unit, and
 applies the LTT gate (`score >= t_hat` -> auto-approve). Returns the
 escalated units paired with their score, the auto-approved count, the
 summed `token_estimate` of the auto-approved units (zero LLM tokens were
@@ -1232,7 +1491,7 @@ API call itself is what costs money.
 **Tech:** none beyond its callees.
 **Fits in:** ONLINE — the "verify" stage.
 
-#### `scan.pipeline.run_scan(path, model_dir=DEFAULT_MODEL_DIR, verifier=None, cache_dir=DEFAULT_CACHE_DIR) -> ScanResult`
+#### `scan.pipeline.run_scan(path, model_dir=DEFAULT_MODEL_DIR, verifier=None, cache_dir=DEFAULT_CACHE_DIR, alpha=None) -> ScanResult`
 **Does:** The scanner's top-level orchestration: `ingest_path` -> one
 semgrep pass over the whole target (`_semgrep_findings`) -> `_rank_and_gate`
 -> `_resolve_escalated` -> merge and sort all findings by
@@ -1644,12 +1903,14 @@ default). Calls `report/accounting.py::compute_cost_summary`,
 
 ## scripts/
 
-Four standalone entry-point scripts, each prepending `src/` to
-`sys.path` so they run without an editable install. Three
-(`run_real.py`, `run_pipeline_dry_run.py`, `train_from_pregenerated.py`)
-drive `research/pipeline.py::run_full_pipeline` with different backend
-choices; `run_eval.py` reads the artifacts those produce and computes
-every metric `research/eval/` currently supports.
+Standalone entry-point scripts, each prepending `src/` to `sys.path` so
+they run without an editable install. Three (`run_real.py`,
+`run_pipeline_dry_run.py`, `train_from_pregenerated.py`) drive
+`research/pipeline.py::run_full_pipeline` with different backend choices;
+`run_eval.py` reads the artifacts those produce and computes every metric
+`research/eval/` currently supports; `relabel.py` re-labels an existing
+corpus with the current oracles; `repair_real_2160.py` is a one-off,
+documented repair of the 2,160-sample corpus.
 
 ### scripts/run_real.py
 
@@ -1680,7 +1941,8 @@ generation path.
 #### `run_real.main() -> int`
 **Does:** The script entry point. Parses args, loads config, resolves the
 Ollama base URL, runs `preflight` (unless skipped), loads prompts (with an
-optional `--limit`), builds backends, and either (`--generate-only`) runs
+optional `--pilot-per-cwe N`, applied first, then `--limit`), prints
+`Planned samples: <n>`, builds backends, and either (`--generate-only`) runs
 just `run_generation` and writes `generations.parquet` for a teammate to
 ship back and consume via `train_from_pregenerated.py` — deliberately
 never executing any generated code, which the docstring notes is exactly
@@ -1688,7 +1950,7 @@ why this mode is safe to run on someone else's machine — or runs the full
 `run_full_pipeline` (generation through calibration) and prints a summary.
 **Talks to:** Invoked as `python scripts/run_real.py`. Calls
 `config.py::load_config`, `env.py::get_env`, `preflight`,
-`research/corpus/prompts.py::load_prompt_bank`, `build_backends`,
+`research/corpus/prompts.py::load_prompt_bank`/`select_pilot_prompts`, `build_backends`,
 `research/generation/harness.py::run_generation`,
 `schemas.py::validate_dataframe`, `research/pipeline.py::run_full_pipeline`.
 **Tech:** `argparse`.
@@ -1749,11 +2011,49 @@ through calibration on it directly, via `run_full_pipeline`'s
 never needs Ollama access. Builds a dummy `{name: None}` backends dict
 purely so the summary's generator count prints correctly; no real
 `Backend` instances are needed since generation is bypassed.
+Both `--out-dir` and `--corpus-version` are required. `--out-dir` used to
+default to `data/model/`, so an exploratory run silently overwrote the
+shipped artifacts; promoting a trained model there is now always a
+deliberate copy.
 **Talks to:** Invoked as `python scripts/train_from_pregenerated.py
-<path>`. Calls `config.py::load_config`, `pandas.read_parquet`,
+<path> --out-dir <dir> --corpus-version <name>`. Calls `config.py::load_config`, `pandas.read_parquet`,
 `research/pipeline.py::run_full_pipeline`.
 **Tech:** `argparse`, `pandas`.
 **Fits in:** OFFLINE — the labeling/calibration half of the split
 generation workflow, consuming what `run_real.py --generate-only`
 produces.
 
+### scripts/relabel.py
+
+#### `relabel.main() -> int`
+**Does:** `--generations <parquet> --out-dir <dir>`. Labels an existing
+corpus with the current oracles, writes `labeled.parquet`, and prints the
+abstention rate, the vulnerable rate among decided samples, the
+CWE × flavor × verdict crosstab, and `n_vuln_calib` against the 59 needed to
+certify α = 0.05 at all. Refuses an `--out-dir` under `data/model/`, so
+exploratory output can never overwrite the shipped artifacts.
+**Talks to:** Invoked as `python scripts/relabel.py`. Calls
+`research/pipeline.py::relabel`/`label_summary`.
+**Tech:** `argparse`, `pandas`.
+**Fits in:** OFFLINE — the measurement loop for every oracle change
+(docs/ENGINEERING_LOG.md §12).
+
+### scripts/repair_real_2160.py
+
+#### `repair_real_2160.main() -> int`
+**Does:** One-off, documented repair of the 2,160-sample corpus pushed on
+branch `corpus/real-540`. That run resumed from a stale September
+checkpoint, so it carried over 404 September answers. The script finds them
+by byte-identical code. It drops the ones whose prompt has been reworded
+since (comparing wording against the prompt bank at commit `aa7f798`), and
+re-derives every `split` from the current bank. It writes the repaired
+`generations.parquet` and a fingerprinted
+`generations.checkpoint.jsonl`, so the generation host can resume and
+produce only the missing samples.
+**Talks to:** Invoked as `python scripts/repair_real_2160.py`. Calls
+`git show` (for the September corpus and prompt bank),
+`research/corpus/prompts.py::load_prompt_bank`,
+`research/generation/harness.py::prompt_fingerprint`.
+**Tech:** `argparse`, `pandas`, `yaml`, `subprocess`.
+**Fits in:** OFFLINE — data repair, kept in the repo so the transformation
+is reproducible (docs/ENGINEERING_LOG.md §12.9).
