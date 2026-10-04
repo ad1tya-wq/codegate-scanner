@@ -33,7 +33,7 @@ Four status labels are used throughout:
 | 7 | Reporting + CLI wiring (`report/`, `codegate scan`) | SOLID (mechanism) / PROVISIONAL (model-gate numbers, cost estimates, per §6) | — | 176 passed |
 | 9 | Demo assets (`examples/vulnerable_app/`) | SOLID | — | 177 passed |
 | — | Evaluation & metrics (`research/eval/metrics.py`, `scripts/run_eval.py`) | SOLID (mechanism) / PROVISIONAL (ranker-quality numbers, per §6) | — | 187 passed |
-| 8 | Retrain on real corpus (join point) | ATTEMPTED on Track A's 516-sample corpus, found 3 real bugs, **not yet certifiable** (§11) — shipped model stays `simulated-v2` | `13d8b83`–`8ea9d39` | 201 passed |
+| 8 | Retrain on real corpus (join point) | SOLID — first attempt (516 samples, §11) certified nothing; after the oracle repairs and the 2,160-sample run, certified and shipped as `real-2040-sym` at α = 0.10 (§12) | `13d8b83`–`e7723fc` | 416 passed |
 
 Current test suite: **416 passed**, 0 failed, ~10 min wall clock (2026-10-04)
 (`python -m pytest tests/ -q`, verified this session).
@@ -1675,7 +1675,8 @@ among decided samples.
 Checked independently from the saved scores: 4 of 206 vulnerable
 calibration samples score above t̂, and `binom.cdf(4, 206, 0.05) = 0.022 ≤ δ`.
 Generator shift: calibrating on three models and testing on the fourth
-holds for all four (realized risk 2.2%, 3.5%, 2.2%, 4.5% against α = 5%).
+holds for all four (realized risk 2.7% codegemma, 3.5% codellama, 2.2% deepseek,
+4.5% qwen, against α = 5%).
 Ranker ROC-AUC 0.891 on the held-out test split (0.926 including training
 data).
 

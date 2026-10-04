@@ -120,7 +120,7 @@ codegate scan examples/vulnerable_app --no-llm
 
 A pre-generated `examples/vulnerable_app/sample_report.pdf` is committed
 in that directory, so you can see the actual PDF output without running
-anything.
+anything. It was produced by the shipped model with `--no-llm`.
 
 ## High-level design
 

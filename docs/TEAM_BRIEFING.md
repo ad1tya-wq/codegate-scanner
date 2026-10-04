@@ -46,12 +46,14 @@ The gate is the actual contribution. It is built on **Learn-Then-Test
 (LTT)**, a form of **conformal risk control** (Angelopoulos, Bates, et
 al., ICLR 2024). Concretely: a lightweight ranker scores every function
 from 0 to 1 (higher = safer), and a calibration procedure certifies the
-highest possible auto-approval threshold `t_hat` such that the true miss
-rate among everything scored above `t_hat` is provably below a chosen
-`alpha` (e.g. 5%), with a chosen confidence `1 - delta` (e.g. 95%). This
-guarantee is **distribution-free and finite-sample** — it does not
-assume the ranker is good. A bad ranker just certifies a lower coverage
-(more gets escalated); it can never produce a false guarantee. That is
+most permissive auto-approval threshold `t_hat` such that the share of
+*vulnerable* functions scoring above `t_hat` (the miss rate) is provably
+below a chosen `alpha` (10% in the shipped model), with a chosen
+confidence `1 - delta` (95%). This guarantee is **distribution-free and
+finite-sample** — it does not assume the ranker is good. A bad ranker just
+certifies a lower coverage (more gets escalated), never a false guarantee.
+What it does assume is that the calibration samples are independent
+draws; see Part 3 for where that bites. That is
 the property a normal "pick a threshold that looked good on a validation
 set" approach does not have, and it is why we can say something no
 competing tool says: not just "here are the bugs we found," but a
@@ -153,8 +155,8 @@ module-level finding's function name (the literal string `"<module>"`)
 was silently parsed as an invalid tag and dropped from the PDF. Fixed by
 escaping every dynamic string before it reaches report text.
 
-**Phase 8 — Retrain on real data.** See Part 3 — this is the current,
-still-open phase.
+**Phase 8 — Retrain on real data.** Done on 2026-10-04, after a first
+attempt certified nothing. See Part 3.
 
 ## Tech stack, briefly, and why
 
@@ -162,6 +164,7 @@ still-open phase.
 |---|---|---|
 | `scikit-learn` (HashingVectorizer + LogisticRegression) | The ranker | Cheap and deterministic enough that LTT can evaluate the risk function at every candidate threshold during calibration without it being slow |
 | `scipy.stats` | The actual statistics behind the certificate | Peer-reviewed, not hand-rolled — the guarantee is only as trustworthy as this math |
+| Ollama (4 local code models) | Generates the training corpus | Free, local, no API key, and not safety-filtered against writing the deliberately vulnerable code the corpus needs; four different model families make the generator-shift test meaningful |
 | `semgrep` (custom local ruleset) | Deterministic static pass | Community rule packs produced zero hits on our raw-stdlib patterns (verified empirically); a small hand-written ruleset targets exactly SQLi/cmdi/creds |
 | Groq (`openai/gpt-oss-120b`) | LLM verifier host | Free tier, fast enough not to bottleneck a scan, OpenAI-compatible so swapping providers later is one new class |
 | `reportlab` + `pygments` | PDF generation | Pure Python, no external binary dependency |
@@ -176,59 +179,61 @@ still-open phase.
 
 ## Current status
 
-Everything through Phase 7 and 9 is built, tested (416 automated tests,
-CI-green on Python 3.11 and 3.13), and verified against real code —
-both the repo's own source and independently-written public
-repositories. Phase 8 (retrain on real data) was attempted this week
-and is the one part of the plan not yet finished — see below.
+Every phase is built and tested: 416 automated tests, all passing
+locally. CI runs on `main`, so it runs once this branch is merged. The
+shipped model is now **trained and certified on real LLM-generated code**:
+
+| | |
+|---|---|
+| Corpus | 2,040 samples: 510 prompts answered by each of 4 local models (qwen2.5-coder, deepseek-coder, codellama, codegemma) |
+| Certificate | `t_hat = 0.7763` at α = 0.10, δ = 0.05; 56% of calibration code auto-approved. α = 0.05 is also certified (`--alpha 0.05`) |
+| Ranker accuracy | ROC-AUC 0.891 on held-out data |
+| Generator shift | Calibrated on 3 models, tested on the 4th: held for all 4 |
+| Demo app | Catches every vulnerability (recall 1.00); precision 0.33 before the verifier |
+
+## How we got here — the honest version
+
+The first real corpus (516 samples, September) certified nothing: only 8
+vulnerable samples reached the calibration split. The tempting reading
+was "not enough data". **It was the labeller.** The detonation harnesses
+called every function with a fixed number of arguments, so ~44% of
+prompts could never be judged. The SQL oracle judged by row count, so it
+labelled injectable DELETEs safe and safe `COUNT(*)` queries vulnerable.
+The credentials oracle required high entropy, which rejects real
+passwords like `hunter2`. Fixing those took the same 516 samples from 8
+vulnerable calibration samples to 25, without generating anything new.
+
+Then scale paid off. A 60-task-per-CWE prompt bank, a pilot run that
+passed every quality gate, and a full run from the teammate's machine
+produced the corpus. Reading the full corpus surfaced another round of
+labeller problems, most importantly a credentials oracle still labelling
+51 of 60 hardcoded secrets "safe". There was also a resume bug that had
+reused 404 stale samples. Both are fixed. The corpus was then trimmed so
+every model answered the same prompts: 206 vulnerable calibration samples,
+and the threshold certifies. Full record: `docs/ENGINEERING_LOG.md` §12.
 
 ## The current open issue, stated plainly
 
-We generated and labeled a real 516-sample corpus from four different
-Ollama models (not simulated templates). Running it through the
-pipeline found and fixed **three real bugs** that the simulated corpus
-had never triggered: a markdown-extraction gap (real chat models wrap
-code in prose our oracles couldn't parse through), a second instance of
-the Phase 1 "oracle failure read as safe" defect class (this time in the
-command-injection detonation harness, triggered by real functions
-having more than one parameter), and a process-hang bug in our sandbox
-(an orphaned child process could keep a Windows subprocess call blocked
-forever, discovered as a genuine 56-minute hang, confirmed via
-`tasklist`/`wmic`, not assumed). All three are fixed and merged.
-
-With all three fixes applied, the corpus **still can't certify a
-threshold.** Only 8 vulnerable samples landed in the calibration split,
-and LTT's statistical guarantee needs more evidence than that to certify
-even a loose bound. This is a sample-size problem, not a mechanism
-problem — the certificate math, the labeling pipeline and the sandbox
-are all now proven correct against real, messy, independently-generated
-code. We just don't have enough of it yet.
-
-**Decision:** the shipped model stays on the simulated corpus (which
-does certify a working threshold and lets us demo the full mechanism
-honestly, with a `PROVISIONAL` banner on every report) until the real
-corpus is large enough. This is disclosed, not hidden — `codegate info`
-and every PDF cover page print the provisional warning outright.
+**The guarantee is somewhat optimistic.** LTT assumes calibration samples
+are independent. Ours cluster: the 206 vulnerable calibration samples come
+from 67 prompts, because four models answered each one. On held-out data
+the realized miss rate was 13.1% against the 10% target. That isn't
+significant on its own, but it points the same way. That is why we ship at
+α = 0.10 rather than 0.05, and it is disclosed in the README, not hidden.
 
 ## How it will be solved
 
-1. **Scale the real corpus.** The plan always called for 1,620 samples
-   (3 generations per prompt) once the 540-sample loop proved out —
-   it has now proven out mechanically; scaling is what's left.
-2. **Rebalance the calibration split**, or generate specifically toward
-   prompts that reliably produce vulnerable-flavor completions, so more
-   of the real vulnerable samples land where LTT can use them.
-3. **Threaded split labels into the eval metrics** so ranker quality can
-   be measured on held-out data specifically, not the full corpus (a
-   separate, already-flagged honesty gap: the current ROC-AUC=1.00 on
-   the simulated corpus is measured on the full corpus, not held out,
-   and reads as a memorization signal, not a generalization one).
-4. Two smaller, lower-priority items already logged: the Groq price
-   table is a carried-over placeholder, not yet verified against real
-   pricing for the new model, and semgrep still misses one class of SQL
-   injection (`%`-style query building split across a `with`/`async
-   with` block) — found scanning a real public repo, partially fixed,
-   documented as needing a taint-mode rule to close fully.
+1. **A cluster-aware certificate** that treats the prompt, not the
+   sample, as the unit of evidence (branch
+   `feat/cluster-aware-certificate`, planned). On today's data the
+   simplest version doesn't certify yet, so this is real design work.
+2. **More prompts, not more samples per prompt** — the independent unit is
+   the prompt, so that is what has to grow.
+3. **Smaller items:** 32% of safe command-execution samples still can't be
+   judged by the harness; the live verifier hasn't been re-measured on
+   the real model; the Groq price table is still a placeholder; and
+   semgrep misses one `%`-formatted SQL pattern split across a `with`
+   block.
 
 ## Five things the literature actually shaped
 

@@ -20,13 +20,14 @@ fast, not waiting on a real API call in front of the panel:
 codegate scan examples/vulnerable_app
 ```
 
-Run this once now. It calls Groq for the 5 escalated units and caches
+Run this once now. It calls Groq for the 8 escalated units and caches
 every result by content hash — the same command during the actual demo
 will be instant (all cache hits, `llm calls made: 0`).
 
 **Have a backup ready** in case live network/API access is flaky in the
 room: `examples/vulnerable_app/sample_report.pdf` is already committed
-and open-able with zero commands. If anything about the live LLM call
+and open-able with zero commands (generated from the shipped model with
+`--no-llm`, so it shows the static + gate result, not verifier output). If anything about the live LLM call
 fails during the demo, say so plainly and fall back to `--no-llm` or the
 committed PDF — do not stall trying to debug it live.
 

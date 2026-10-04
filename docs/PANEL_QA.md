@@ -35,7 +35,7 @@ It's deliberately simple:
    `split: calib`, or `split: test` tag at the *task-group* level
    ([`research/corpus/prompts.py:27`](../src/codegate/research/corpus/prompts.py)),
    carried through generation into `gen_df["split"]`
-   ([`research/generation/harness.py:114`](../src/codegate/research/generation/harness.py)).
+   ([`research/generation/harness.py:137`](../src/codegate/research/generation/harness.py)).
    `run_full_pipeline` fits the ranker only on `split == "train"` rows and
    calibrates LTT only on `split == "calib"` rows
    (`research/pipeline.py::run_full_pipeline`). The `test` split is used
