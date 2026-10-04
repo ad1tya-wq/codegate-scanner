@@ -35,7 +35,7 @@ Four status labels are used throughout:
 | — | Evaluation & metrics (`research/eval/metrics.py`, `scripts/run_eval.py`) | SOLID (mechanism) / PROVISIONAL (ranker-quality numbers, per §6) | — | 187 passed |
 | 8 | Retrain on real corpus (join point) | SOLID — first attempt (516 samples, §11) certified nothing; after the oracle repairs and the 2,160-sample run, certified and shipped as `real-2040-sym` at α = 0.10 (§12) | `13d8b83`–`e7723fc` | 416 passed |
 
-Current test suite: **416 passed**, 0 failed, ~10 min wall clock (2026-10-04)
+Current test suite: **435 passed**, 0 failed, ~10 min wall clock (2026-10-04)
 (`python -m pytest tests/ -q`, verified this session).
 
 ## 3 · Per-phase entries
@@ -892,7 +892,7 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-416 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+435 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
 counts per file regenerated 2026-10-04).
 
 | File | Tests | Protects |
@@ -904,24 +904,24 @@ counts per file regenerated 2026-10-04).
 | `test_verifier.py` | 17 | JSON verdict parsing, degradation without a backend or on backend errors, caching, `Finding` mapping, `build_verifier_backend` |
 | `test_oracle_robustness.py` | 15 | The SQLi table-name abstention-defect class, plus the sink-shortcut correctness tests |
 | `test_scan_pipeline.py` | 15 | `Finding` validation, semgrep mapping, the no-execution invariant, gate partitioning, uncertified-threshold escalation, verifier paths, cache reuse, token accounting, `calibration` pass-through |
-| `test_artifacts.py` | 13 | Model/calibration round trips, missing-file errors, uncertified `t_hat`, version guard, the persisted frontier, `at_alpha` (certified, uncertified and never-computed alphas), pre-frontier files still loading |
+| `test_artifacts.py` | 15 | Model/calibration round trips, missing-file errors, uncertified `t_hat`, version guard, the persisted frontier, `at_alpha` (certified, uncertified and never-computed alphas), pre-frontier files still loading |
 | `test_cli.py` | 13 | `info`/`calibrate`/`scan` via `CliRunner`, including `--alpha` with a certified alpha and refusing an uncertified one |
-| `test_eval_metrics.py` | 13 | Oracle accuracy on fixtures, label distribution, score frames, separation metrics, held-out split filtering (and refusing a split filter without split data), `scan_ground_truth_eval` |
-| `test_oracle_invocation.py` | 12 | Benign-value heuristics, the self-contained harness prelude, allowlist harvesting |
+| `test_eval_metrics.py` | 15 | Oracle accuracy on fixtures, label distribution, score frames, separation metrics, held-out split filtering (and refusing a split filter without split data), `scan_ground_truth_eval` |
+| `test_oracle_invocation.py` | 13 | Benign-value heuristics, the self-contained harness prelude, allowlist harvesting |
 | `test_pipeline_extract_code.py` | 11 | Code extraction from fenced, tagged, `<pre>`, `<details>` and unopened-fence completions |
-| `test_report_pdf.py` | 11 | Highlighting, excerpts, escaping regressions, a real PDF's signature and size, edge cases |
+| `test_report_pdf.py` | 12 | Highlighting, excerpts, escaping regressions, a real PDF's signature and size, edge cases |
 | `test_generation.py` | 10 | `SimulatedBackend` shape/determinism, `stable_seed`, backend construction |
 | `test_generation_resume.py` | 9 | Checkpoint write/read, resume, partial failure, and (2026-10-04) regenerating reworded or unfingerprinted records while taking the split from the current prompt |
 | `test_ingest.py` | 9 | Function extraction, hashes, syntax/unreadable-file reporting, skips, missing-path error |
-| `test_report_json_sarif.py` | 6 | JSON round trips, null certificate, SARIF 2.1.0 shape and mappings |
-| `test_config.py` | 5 | Config loading, and that leftover `split_ratios` and `adjudicator` keys are ignored |
+| `test_report_json_sarif.py` | 7 | JSON round trips, null certificate, SARIF 2.1.0 shape and mappings |
+| `test_config.py` | 7 | Config loading, leftover `split_ratios`/`adjudicator` keys ignored, the `certificate` setting and its validation |
 | `test_relabel.py` | 5 | `relabel` row count and separation, `label_summary` shape |
-| `test_ltt.py` | 5 | `calibrate_threshold` monotonicity, separation and zero-vulnerable edge cases |
+| `test_ltt.py` | 13 | `calibrate_threshold` — monotonicity, separation, zero-vulnerable edge case; the cluster-aware test: Hoeffding–Bentkus p-values, recorded method and group count, duplicated evidence buying no looser threshold, and a seeded simulation showing it keeps its promise under strong correlation where the per-sample test does not |
 | `test_risk.py` | 5 | `empirical_risk`, Clopper-Pearson edge cases |
 | `test_ranker.py` | 5 | `R2Ranker` fit/score contract, score orientation |
 | `test_report_accounting.py` | 5 | Cost accounting arithmetic, always flagged as an estimate |
 | `test_schemas.py` | 4 | `validate_dataframe` |
-| `test_eval.py` | 4 | Cost-coverage frontier, generator-shift experiment |
+| `test_eval.py` | 6 | Cost-coverage frontier (including grouped), generator-shift experiment (including grouped calibration judged on separate held-out data) |
 | `test_report_terminal.py` | 4 | Terminal rendering |
 | `test_env.py` | 3 | `.env` loading |
 | `test_report_remediation.py` | 3 | Remediation entries per CWE |
@@ -1725,3 +1725,105 @@ exceeds α. As at 0.05 this is not significant on its own (P(≥ 14 | 107,
 effect described in 12.10, and it is the reason the cluster-aware
 certificate is next. The live-verifier row of the README was not re-run.
 It needs a Groq key and spends API calls.
+
+## 13 · Cluster-aware certificate (2026-10-04)
+
+Branch `feat/cluster-aware-certificate`. Plan: `docs/cluster-aware-certificate/README.md`.
+
+**The problem.** LTT's per-sample test counts every vulnerable calibration
+sample as an independent Bernoulli draw. Four models answer each task, so
+the shipped corpus's 206 vulnerable calibration samples are 66 task
+groups. Their scores correlate within a group: ICC(1) = 0.57 (one-way
+ANOVA on vulnerable calibration scores by task group, k₀ = 3.12), so the
+design effect is 2.2 and the evidence is worth about 94 independent
+samples, not 206. On held-out data the per-sample α = 0.10 threshold
+auto-approved 13.1% of vulnerable code (§12.11).
+
+**The method.** `gate/ltt.py::calibrate_threshold(..., groups=...)`. A
+group's loss at threshold `t` is the fraction of its vulnerable samples
+scoring ≥ `t`. The risk is the mean over groups holding a vulnerable
+sample, and each threshold in the fixed sequence is tested with the
+Hoeffding–Bentkus p-value for bounded losses (`hoeffding_bentkus_p_value`,
+the p-value of Angelopoulos et al.'s "Learn then Test"). Validity needs
+only task groups to be exchangeable; samples within a group may be
+arbitrarily correlated. Groups are task groups (prompt id minus flavor),
+so every model's answer to one task, in any flavor, is one group.
+Selected by `certificate: cluster` in `config.yaml` (the default);
+`certificate: sample` keeps the old test.
+
+**Candidates compared first** (on the shipped scores, task group as unit;
+test-split miss rate per sample / per group):
+
+| α | per-sample binomial (old) | group any-miss, exact binomial | **group fraction, Hoeffding–Bentkus (chosen)** |
+|---|---|---|---|
+| 0.05 | t̂ 0.8276, 48.9%, test 8.4% / 6.8% | t̂ 0.9088, 29.2%, test 0 / 0 | t̂ 0.9088, 29.2%, test 0 / 0 |
+| 0.10 | t̂ 0.7763, 56.4%, test 13.1% / 11.1% | t̂ 0.8313, 47.5%, test 7.5% / 6.1% | **t̂ 0.8276, 48.9%, test 8.4% / 6.8%** |
+| 0.15 | t̂ 0.7524, 61.1%, test 16.8% / 14.6% | t̂ 0.8098, 50.4%, test 12.1% / 10.4% | t̂ 0.7772, 56.0%, test 13.1% / 11.1% |
+| 0.20 | t̂ 0.7444, 63.0%, test 16.8% / 14.6% | t̂ 0.7907, 53.9%, test 13.1% / 11.1% | t̂ 0.7559, 60.6%, test 16.8% / 14.6% |
+
+The fraction-based test was chosen: it bounds the same quantity as before
+(share of vulnerable code auto-approved, weighted per task), it is the
+bounded-loss form LTT itself prescribes, and it covers more than any-miss
+at every α except 0.05, where they tie.
+
+**Validity, by simulation.** Group sizes copied from the shipped corpus (66
+groups), scores with within-group correlation ρ, 400 replications at
+α = 0.10, δ = 0.05; failure means certifying a threshold whose true miss
+rate exceeds α (allowed: ≤ δ):
+
+| ρ | per-sample (old) | group any-miss | group fraction HB |
+|---|---|---|---|
+| 0.00 | 0.020 | 0.000 | 0.000 |
+| 0.50 | **0.085** | 0.000 | 0.000 |
+| 0.80 | **0.092** | 0.000 | 0.000 |
+| 0.95 | **0.120** | 0.003 | 0.000 |
+
+The per-sample test breaks its own δ once samples correlate. A seeded
+version of this is a test
+(`test_grouped_certificate_keeps_its_promise_under_strong_correlation`),
+as is the mechanism behind it: copying every vulnerable sample four times
+inside its own group loosens the per-sample threshold and leaves the
+grouped one unchanged
+(`test_duplicating_samples_inside_a_group_buys_no_looser_threshold`).
+
+**Also fixed: the generator-shift experiment used training data.** It
+calibrated on every split of three generators and measured every split of
+the fourth, so the ranker's own training samples, which score
+optimistically, were on both sides. It now calibrates on the calibration
+split and judges the held-out generator on its samples the ranker never
+trained on. Same honest experiment, α = 0.10:
+
+| Held out | per-sample (old) | cluster-aware (new) |
+|---|---|---|
+| codegemma:7b-instruct | 12/91 = 13.2% | 10/91 = 11.0% (P(≥ 10 \| 10%) = 0.43) |
+| codellama:7b | 5/69 = 7.2% | 2/69 = 2.9% |
+| deepseek-coder:6.7b | 5/82 = 6.1% | 2/82 = 2.4% |
+| qwen2.5-coder:7b | 5/71 = 7.0% | 4/71 = 5.6% |
+
+The earlier "held for all four, 2.2–4.5%" (§12.10) was at α = 0.05 and
+included training data; it is superseded.
+
+**Shipped.**
+```
+python scripts/train_from_pregenerated.py data/runs/real_sym/generations.parquet --out-dir data/runs/real_sym_cluster --corpus-version real-2040-sym
+python scripts/run_eval.py
+```
+The ranker is byte-identical to §12.11's (`model.joblib` compared with
+`cmp`); only the certificate changed. `calibration.json` now records
+`method: cluster-hb` and `n_vuln_groups: 66`, and every report names the
+method.
+
+| | per-sample (§12.11) | **cluster-aware (now)** |
+|---|---|---|
+| t̂ at α = 0.10 | 0.7763 | **0.8276** |
+| coverage (calib) | 56.4% | **48.9%** |
+| held-out vulnerable auto-approved | 13.1% per sample | **8.4% per sample, 6.8% per group** (95% cluster bootstrap 0.8–15.2%) |
+| α = 0.05 also certified | t̂ 0.8276, 48.9% | t̂ 0.9088, 29.2% |
+| demo app, static + gate | 6 auto-approved / 8 escalated; P 0.33, R 1.00 | 3 / 11; P 0.25, R 1.00 |
+
+**Also corrected:** the PDF's guarantee sentence said "for any function
+scored at or above t_hat, the probability it is actually vulnerable is at
+most α". That is not what LTT bounds. It now says of vulnerable
+functions, at most α are auto-approved.
+
+**Status:** `SOLID`. 435 tests pass.

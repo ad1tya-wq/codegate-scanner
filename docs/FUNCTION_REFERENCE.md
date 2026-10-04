@@ -38,7 +38,9 @@ ONLINE (scanner, runs constantly, consumes artifacts):
 ### `config.load_config(path: str = "config.yaml") -> CodeGateConfig`
 **Does:** Reads `config.yaml` and returns an immutable `CodeGateConfig`
 built from the raw YAML (alpha, delta, seed, CWEs, flavors, generators,
-verifier, samples/prompts per CWE, paths). Two keys used to be parsed here
+verifier, samples/prompts per CWE, paths, and `certificate`: `"cluster"`
+(the default — task groups are the certificate's unit of evidence) or
+`"sample"`, validated). Two keys used to be parsed here
 and read by nothing, and both are now ignored if an old config still
 carries them. `split_ratios` (removed 2026-09-14): splits come from each
 task group's `split:` key in the prompt YAML. `adjudicator` (removed
@@ -189,7 +191,19 @@ supporting risk-estimation helpers used by the eval/shift code (`risk.py`).
 
 ### gate/ltt.py
 
-#### `gate.ltt.calibrate_threshold(scores, labels, alpha, delta, thresholds=None) -> LTTResult`
+#### `gate.ltt.hoeffding_bentkus_p_value(risk_hat: float, n: int, alpha: float) -> float`
+**Does:** The p-value for "the true mean loss is at least `alpha`", given
+the observed mean `risk_hat` of `n` independent losses bounded in [0, 1].
+It is the minimum of the Hoeffding bound in its KL form and Bentkus'
+bound, `e · P(Binomial(n, alpha) ≤ ⌈n · risk_hat⌉)`. That is the p-value
+"Learn then Test" (Angelopoulos et al., 2021) uses for bounded,
+non-binary losses. Returns 1.0 when `risk_hat ≥ alpha`.
+**Talks to:** Called by `calibrate_threshold` when it is given groups.
+**Tech:** `math`, `scipy.stats.binom`.
+**Fits in:** OFFLINE — the statistical test behind the cluster-aware
+certificate.
+
+#### `gate.ltt.calibrate_threshold(scores, labels, alpha, delta, thresholds=None, groups=None) -> LTTResult`
 **Does:** Runs Learn-Then-Test fixed-sequence testing over a descending
 grid of candidate thresholds (largest/most-conservative first, `+inf`
 prepended as a trivially-valid starting point) to find the
@@ -202,6 +216,18 @@ the first threshold that fails certification, since monotonicity of the
 risk function guarantees every less-conservative threshold also fails.
 Returns `t_hat=None` when even the most conservative threshold can't be
 certified, meaning "escalate everything."
+
+With `groups` (one label per sample — in the pipeline, the task group),
+the test changes. The unit of evidence becomes the group: a group's loss
+is the fraction of its vulnerable samples scoring ≥ `t`, the risk is the
+mean over groups holding a vulnerable sample, and each threshold is tested
+with `hoeffding_bentkus_p_value`. That needs only the groups to be
+exchangeable. The per-sample binomial test is optimistic when samples
+within a group correlate (several models answering one task): in
+simulation it certified thresholds that truly missed more than α in up to
+12% of runs, against the δ = 5% allowed. The result's `method` is
+`"sample-binomial"` or `"cluster-hb"`, and `n_vuln_groups` counts the
+groups. See `docs/ENGINEERING_LOG.md` §13.
 **Talks to:** Called by `research/pipeline.py::run_full_pipeline` (at the
 project's configured alpha/delta, to produce the certificate that gets
 persisted) and `research/eval/frontier.py::compute_frontier` (swept
@@ -215,7 +241,8 @@ the ONLINE gate (`scan/pipeline.py::_rank_and_gate`) later reads and
 compares scores against.
 
 *(`LTTResult` is a frozen dataclass holding `t_hat`/`alpha`/`delta`/
-`n_vuln_calib`/`coverage`/`trace` — no methods of its own.)*
+`n_vuln_calib`/`coverage`/`trace`/`method`/`n_vuln_groups` — no methods of
+its own.)*
 
 ### gate/risk.py
 
@@ -893,8 +920,13 @@ frontier so scan-time `--alpha` can look thresholds up) tagged with
 and `is_provisional` (provisional iff `is_simulated`) -> run a per-generator
 holdout shift experiment (`run_shift_experiment`) for every generator with
 at least 2 generators and >0 vulnerable calibration samples -> plot and
-persist shift results. Returns a summary dict (`n_generated`, `vuln_rate`,
-`n_abstain`, `n_vuln_calib`, `t_hat`, `coverage`, `corpus_version`,
+persist shift results. Each sample's task group (prompt id minus flavor)
+is derived first. With `certificate: cluster` in the config, the frontier,
+the operating-point calibration and the shift experiment all use it. The
+shift experiment calibrates on the calibration split and judges each
+held-out generator on its non-training samples. Returns a summary dict
+(`n_generated`, `vuln_rate`, `n_abstain`, `n_vuln_calib`, `t_hat`,
+`coverage`, `certificate_method`, `corpus_version`,
 `is_provisional`, `n_shift_experiments`). Writes placeholder plots instead
 of real ones when there's insufficient data (zero vulnerable calibration
 samples, or fewer than 2 generators) rather than crashing.
@@ -957,6 +989,11 @@ nothing else beyond `json.dumps` and `dataclasses.asdict`.
 **Tech:** `json`, `datetime` (`timezone.utc`).
 **Fits in:** OFFLINE — persists the certificate as
 `data/model/calibration.json`.
+
+*(`Calibration` also records `method` — `"cluster-hb"` or
+`"sample-binomial"`, the default for files written before 2026-10-04 —
+and `n_vuln_groups`. `method_description()` renders them for reports,
+e.g. "cluster-aware: 66 task groups (Hoeffding-Bentkus)".)*
 
 #### `research.artifacts.Calibration.at_alpha(alpha: float) -> Calibration`
 **Does:** Returns this certificate restated at `alpha`: itself if `alpha`
@@ -1171,11 +1208,13 @@ DataFrame.
 
 ### research/eval/frontier.py
 
-#### `research.eval.frontier.compute_frontier(scores, labels, alphas: list[float], delta: float) -> pd.DataFrame`
+#### `research.eval.frontier.compute_frontier(scores, labels, alphas: list[float], delta: float, groups=None) -> pd.DataFrame`
 **Does:** For each candidate alpha, certifies an LTT threshold and records
 the coverage it buys, producing the headline cost-coverage curve — the
 fraction of traffic that never needs an LLM call, as a function of the
-certified miss-rate.
+certified miss-rate. With `groups`, every alpha uses the cluster-aware
+test. Columns: `alpha`, `t_hat`, `coverage`, `n_vuln_calib`,
+`n_vuln_groups`.
 **Talks to:** Called by `research/pipeline.py::run_full_pipeline`, swept
 across alphas that bracket the configured operating point. Calls
 `gate/ltt.py::calibrate_threshold`.
@@ -1214,7 +1253,8 @@ produced by `research/pipeline.py::label_row` has, simulated or real.
 calibration upstream, so they shouldn't count as "safe" here either).
 Given `generations_df`, each row also carries its `split`. It is joined
 here rather than written into `scores_r2.parquet` so the `scores` schema
-stays the ranker's own contract.
+stays the ranker's own contract. When `generations_df` has `prompt_id`,
+each row also carries its `task_group`.
 **Talks to:** Called by `scripts/run_eval.py::main`. Calls nothing else —
 a pandas merge.
 **Tech:** `pandas`.
@@ -1232,6 +1272,20 @@ a held-out name.
 `sklearn.metrics.roc_auc_score`.
 **Tech:** `sklearn.metrics.roc_auc_score`.
 **Fits in:** OFFLINE (eval).
+
+#### `research.eval.metrics.heldout_miss_rate(score_frame, t_hat, split="test", n_boot=2000, seed=0) -> dict`
+**Does:** Checks the certificate against data it never saw: of the
+vulnerable samples in `split`, the share scoring ≥ `t_hat`. Reports it
+per sample and per task group — the quantity the cluster-aware certificate
+bounds. It also gives a 95% bootstrap interval for the per-group figure,
+resampling whole task groups, since resampling correlated samples would
+understate the uncertainty. Keys: `n_vulnerable`, `n_groups`,
+`per_sample`, `per_group`, `ci_low`, `ci_high`.
+**Talks to:** Called by `scripts/run_eval.py::main`. Needs a frame from
+`ranker_score_frame(..., generations_df=...)`, which carries `split` and
+`task_group`.
+**Tech:** `numpy`, `pandas`.
+**Fits in:** OFFLINE (eval) — the held-out check of the shipped guarantee.
 
 #### `research.eval.metrics.scan_ground_truth_eval(scan_result: ScanResult, ground_truth: dict[tuple[str, str], bool]) -> dict`
 **Does:** Computes precision/recall/F1/accuracy of a scan's findings (any
@@ -1305,7 +1359,7 @@ marked.
 
 ### research/eval/shift.py
 
-#### `research.eval.shift.run_shift_experiment(scores_by_generator, labels_by_generator, held_out, alpha, delta) -> ShiftResult`
+#### `research.eval.shift.run_shift_experiment(scores_by_generator, labels_by_generator, held_out, alpha, delta, groups_by_generator=None, held_out_scores=None, held_out_labels=None) -> ShiftResult`
 **Does:** The headline "does the certificate survive a generator switch"
 experiment. Calibrates an LTT threshold on every generator *except*
 `held_out`, pooled together, then measures the realized empirical risk on
@@ -1313,7 +1367,14 @@ experiment. Calibrates an LTT threshold on every generator *except*
 the realized risk stayed `<= alpha`. Raises `ValueError` if there's no
 non-held-out generator to calibrate on. Returns `certificate_held=False`
 (with `t_hat=None`, risk `nan`) if no threshold could even be certified on
-the calibration generators.
+the calibration generators. With `groups_by_generator`, calibration is
+cluster-aware; a group label shared across generators (the task group)
+keeps every answer to one task in one group. `held_out_scores`/
+`held_out_labels` judge the held-out generator on separate data. The
+pipeline passes the calibration split to calibrate on, and the held-out
+generator's samples the ranker never trained on to judge with. Until
+2026-10-04 both sides used every split, training samples included, which
+flattered the result.
 **Talks to:** Called by `research/pipeline.py::run_full_pipeline`, once
 per generator (each held out in turn), when there are >=2 generators and
 >0 vulnerable calibration samples. Calls `gate/ltt.py::calibrate_threshold`,

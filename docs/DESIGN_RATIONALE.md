@@ -270,29 +270,22 @@ a clean, different environment agrees.
 
 Ranked roughly by how load-bearing they are to the project's central
 claim (the certificate), not by how easy they are to build. Retraining on
-real data, held-out ranker evaluation and scan-time `--alpha` were on
-this list and are done (`ENGINEERING_LOG.md` §12).
+real data, held-out ranker evaluation, scan-time `--alpha` and a
+cluster-aware certificate were on this list and are done
+(`ENGINEERING_LOG.md` §12–13).
 
-1. **A cluster-aware certificate.** LTT assumes independent calibration
-   samples. Ours cluster, because four models answered each prompt: 206
-   vulnerable calibration samples come from 67 prompts. So the shipped
-   certificate is somewhat optimistic, and it ships at α = 0.10 rather than
-   0.05 for that reason. The fix is a certificate whose unit of evidence is
-   the prompt (branch `feat/cluster-aware-certificate`). On today's data
-   its simplest form does not certify yet.
-2. **More task groups, not more samples per prompt.** The prompt is the
-   independent unit, so that is what has to grow. Certifying α = 0.05 at
-   prompt level needs at least 59 vulnerable calibration prompts with no
-   misses.
-3. **Better harness values for path- and directory-validated code.** 32%
+1. **More task groups, not more samples per task.** The certificate counts
+   each task group once, so tasks are what buy coverage. With 66
+   vulnerable calibration groups, α = 0.05 certifies only 29% coverage.
+2. **Better harness values for path- and directory-validated code.** 32%
    of safe command-execution samples still can't be judged, which loses
    exactly the hard negatives the ranker learns most from.
-4. **Re-measure the live verifier on the real model**, and record real
+3. **Re-measure the live verifier on the real model**, and record real
    per-call token usage from the API's `usage` field instead of a
    characters ÷ 4 estimate against a placeholder price table.
-5. **A code-embedding ranker.** The guarantee holds for any ranker; a
+4. **A code-embedding ranker.** The guarantee holds for any ranker; a
    better one buys more coverage at the same α.
-6. **Broader CWE coverage.** Each additional CWE needs its own
+5. **Broader CWE coverage.** Each additional CWE needs its own
    reliable, automatable ground-truth signal before it can be added —
    the project's standard (dynamic detonation where possible, a
    deterministic static rule otherwise) is what makes the certificate
@@ -327,14 +320,18 @@ whether the certificate survives a distribution shift, and
 proves the framework *notices* when it doesn't hold, rather than
 silently reporting a false guarantee. A "normal" threshold has no
 mechanism to detect this at all. On the real corpus, calibrating on three
-models and testing on the fourth held for all four (realized miss rates
-2.7%, 3.5%, 2.2%, 4.5% against α = 0.05).
+models and testing on the fourth's unseen data, three of four stay within
+α = 0.10 (2.4%, 2.9%, 5.6%) and codegemma comes in at 11.0% (10 of 91, not
+significant).
 
-The honest limit of this claim is the exchangeability assumption itself.
-Our calibration samples are correlated by prompt, which makes the
-certificate somewhat optimistic. On held-out data the realized miss rate
-was 13.1% against the shipped 10%. That is why it ships at 0.10, and why
-the cluster-aware certificate is first on the future-work list.
+The honest limit of this claim is the exchangeability assumption itself,
+and this project hit it. Four models answering the same task give
+correlated samples, and the standard per-sample test was optimistic for
+them: on held-out data its α = 0.10 threshold missed 13.1%. The shipped
+certificate counts each task group once instead (Hoeffding–Bentkus over
+per-group miss fractions). It stays within target on held-out data (6.8%
+per task) and kept its promise in every simulated setting, where the
+per-sample test broke it 8.5–12% of the time.
 
 ### Claim: the triage design is what makes LLM-based verification economically viable, not just accurate
 
@@ -342,20 +339,20 @@ the cluster-aware certificate is first on the future-work list.
 certificate can't clear" is either exhaustive LLM review (correct, but
 doesn't scale to CI-pipeline latencies or costs) or static-analysis-only
 (scales fine, but has no mechanism to bound what it's missing). On the
-demo app, the shipped real-data model auto-approves 6 of 14 functions with
+demo app, the shipped real-data model auto-approves 3 of 14 functions with
 no LLM call at all, under a certificate that at most 10% of vulnerable
-functions get auto-approved. It escalates the other 8 to the verifier,
+functions get auto-approved. It escalates the other 11 to the verifier,
 one cached call each. Static + gate alone already reaches recall 1.00,
-with precision 0.33: every real vulnerability is caught, and some safe
-code is escalated. The verifier's job is to clear those, and its effect on
+with precision 0.25: every real vulnerability is caught, and most safe
+code on this small target is escalated. The verifier's job is to clear those, and its effect on
 this model has not been re-measured yet. On the earlier simulated model
 it took precision from 0.50 to 1.00.
 
 ```mermaid
 flowchart LR
     A["14 functions\n(examples/vulnerable_app/)"] --> B{"Certified gate\n(alpha = 0.10)"}
-    B -->|"6 auto-approved\n0 LLM calls"| C["Certificate: at most 10%\nof vulnerable functions\nget here (95% confidence)"]
-    B -->|"8 escalated"| D{"LLM verifier\n8 calls, cached"}
+    B -->|"3 auto-approved\n0 LLM calls"| C["Certificate: at most 10%\nof vulnerable functions\nget here (95% confidence)"]
+    B -->|"11 escalated"| D{"LLM verifier\n11 calls, cached"}
     D -->|"confirmed"| E["Real findings"]
     D -->|"cleared"| F["Correctly\nleft alone"]
 ```
@@ -367,8 +364,8 @@ not a claim about a 10,000-function monorepo. What *does* generalize is
 the mechanism: the fraction requiring an LLM call is exactly the
 fraction the certificate can't clear, and that fraction is a property of
 the ranker's quality and `alpha`, not of codebase size. On the real
-corpus's calibration data the shipped threshold auto-approves 56% of
-functions, so a larger codebase like it would see roughly 44% escalated.
+corpus's calibration data the shipped threshold auto-approves 49% of
+functions, so a larger codebase like it would see roughly half escalated.
 That is the actual cost claim: bounded LLM spend as a function of
 `alpha`, not of lines of code.
 
@@ -415,10 +412,11 @@ not having finished the project?"* For most of the build the model was
 calibrated on a simulated corpus and flagged provisional, while the
 mechanism was fully built and verified against a live LLM endpoint. The
 flag was lifted only when a real corpus certified, in October 2026, and
-the same discipline continues past that point. The README states the
-clustering caveat beside the headline number, the verifier figures are
-marked "not yet re-measured" rather than carried over from the simulated
-model, and the shipped α was relaxed to 0.10 instead of quoting 0.05 with
-a footnote. A confident-looking number nobody should trust is the
+the same discipline continues past that point. When the held-out data
+showed the standard certificate overshooting, it was replaced with a
+stricter cluster-aware one at the cost of coverage, the verifier figures
+are marked "not yet re-measured" rather than carried over from the
+simulated model, and the shipped α is 0.10 because that is what the honest
+certificate supports with useful coverage. A confident-looking number nobody should trust is the
 specific failure this project's design exists to prevent, and that
 applies to its own headline too.

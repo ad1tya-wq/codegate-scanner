@@ -78,12 +78,13 @@ scripts/run_eval.py`, `docs/ENGINEERING_LOG.md` §12.10–12.11):
 |---|---|
 | Corpus | 2,040 samples (510 prompts × 4 models); 6.7% abstained; 26.9% of decided samples vulnerable |
 | Ranker ROC-AUC, held-out test split | **0.891** (0.926 including its own training data) |
-| Certified `t_hat` (shipped operating point) | **0.7763 at α = 0.10, δ = 0.05**; 56.4% of calibration code auto-approved |
-| Also certified | 0.8276 at α = 0.05 (48.9% coverage), via `codegate scan --alpha 0.05` |
-| `n_vuln_calib` | 206 |
-| Generator shift (calibrate on 3 models, test the 4th) | held for all 4 (realized 2.2–4.5% vs α = 0.05) |
+| Certified `t_hat` (shipped operating point) | **0.8276 at α = 0.10, δ = 0.05**, cluster-aware over 66 task groups; 48.9% of calibration code auto-approved |
+| Also certified | 0.9088 at α = 0.05 (29.2% coverage), via `codegate scan --alpha 0.05` |
+| `n_vuln_calib` | 206 samples in 66 task groups |
+| Held-out check | 6.8% per task group (8.4% per sample) of unseen vulnerable code auto-approved, against 10%; 95% cluster bootstrap 0.8–15.2% |
+| Generator shift (calibrate on 3 models, test the 4th on unseen data) | 3 of 4 within α = 0.10 (2.4%, 2.9%, 5.6%); codegemma 11.0% (10 of 91, P = 0.43) |
 | Oracle accuracy (fixtures) | 6/6 |
-| Demo app, static + gate only | precision 0.33, recall 1.00 |
+| Demo app, static + gate only | precision 0.25, recall 1.00 |
 | Demo app, with the verifier | not yet re-measured on this model (simulated model: 1.00 / 1.00) |
 
 **For comparison — the simulated model it replaced:** 540 samples,
@@ -290,20 +291,35 @@ check your own numbers against what they should be, you don't accept
 silent hangs, and you don't trust a pipeline until you've run something
 real through it, not just something you generated yourself.
 
+### What was the last big weakness, and how was it fixed?
+
+**The standard certificate treated correlated samples as independent.** The
+206 vulnerable calibration samples come from only 66 task groups, because
+four models answered each task, and their scores correlate within a group
+(0.57, worth about 94 independent samples). On held-out data the standard
+test's α = 0.10 threshold auto-approved 13.1% of vulnerable code.
+CodeGate's certificate is **cluster-aware**. Several models answer each
+task, so samples from one task group are correlated (measured intra-group
+correlation 0.57 on the shipped corpus). The standard test treats every
+sample as independent and becomes optimistic. In simulation it certified
+thresholds that really missed more than α in 8.5–12% of runs, against the
+5% allowed. So CodeGate counts each task group once. A group's loss is the
+fraction of its vulnerable samples above `t`, the risk is the mean over
+groups, and each threshold is tested with the Hoeffding–Bentkus p-value
+for bounded losses (the one the LTT paper uses). That needs only *task
+groups* to be exchangeable, which kept its promise in every simulated
+setting.
+At α = 0.10 it gives t̂ = 0.8276, auto-approving 49% of code instead of 56%,
+and on held-out data it auto-approves 6.8% of vulnerable code per task
+(8.4% per sample), within target. Fixing the generator-shift experiment
+the same day (it had been calibrating on training data) leaves 3 of 4
+models within 10% and codegemma at 11.0%, which is within noise.
+
 ### What's the main weakness right now?
 
-**The certificate treats correlated samples as independent.** The 206
-vulnerable calibration samples come from only 67 prompts, because four
-models answered each prompt. LTT's binomial test assumes independent draws,
-so the effective evidence is smaller than 206 and the certificate is
-somewhat optimistic. On the held-out test split, the share of vulnerable
-code auto-approved was 8.4% at α = 0.05 and 13.1% at α = 0.10. Neither is
-significant on its own (P = 0.088 and 0.18), but both point the same way,
-and most misses cluster in two credential tasks. That is why the shipped
-operating point is α = 0.10, not 0.05, and why a cluster-aware certificate
-is the next piece of work (branch `feat/cluster-aware-certificate`).
-
-Two smaller ones:
+**Coverage.** The honest certificate is stricter: α = 0.05 certifies only
+29% coverage. The task is the unit of evidence, so the way to buy coverage
+is more tasks, not more samples per task. Two smaller ones:
 1. 32% of the *safe* command-execution samples still can't be judged. Their
    input checks (an existing destination folder, a path under a base
    directory) reject every test value the harness can construct. They are
@@ -323,7 +339,8 @@ passwords. Only after that did scale pay off: the 2,040-sample corpus,
 labelled with the repaired oracles, gives 206. "Better LLM" helped in
 one specific place: `starcoder2`, a base completion model, produced no
 vulnerable code at all and was replaced. And the next limit isn't sample
-count, it's independence: more *prompts*, not more samples per prompt.
+count, it's independence: more *tasks*, not more samples per task, since
+the certificate counts each task once.
 
 ---
 
@@ -389,8 +406,8 @@ A useful framing that doesn't require any ML background:
   auto-approved) — it never produces a *false* guarantee. This is exactly
   what let the team build and honestly demo the full scanner *before* real
   training data existed (Bates et al., J. ACM 2021 — see below). The one
-  thing it does assume is that calibration samples are exchangeable draws.
-  Correlated samples weaken it, which is the open issue in Part 2.
+  thing it does assume is exchangeability. CodeGate applies that to *task
+  groups*, not samples, because samples within a task are correlated (Part 2).
 - **Finite-sample exact, not asymptotic.** The certificate is valid for the
   calibration sample size actually on hand — relevant here specifically,
   since this project never has millions of labeled samples. An

@@ -1,82 +1,87 @@
-# Cluster-aware certificate (planned — not started)
+# Cluster-aware certificate
 
-**Status:** placeholder branch, opened 2026-10-04 so this isn't forgotten. No
-code yet. Start only after the α = 0.10 release on
-`feat/certificate-restoration` is merged and working.
+**Status:** implemented and shipped on this branch (2026-10-04).
+Full record with every number and command: `docs/ENGINEERING_LOG.md` §13.
 
 ## The problem
 
 LTT certifies a threshold `t̂` when `binom.cdf(k, n, α) ≤ δ`, where `n` is the
 number of vulnerable calibration samples and `k` is how many of them score
-above `t̂`. The binomial test assumes those `n` samples are **independent**.
+above `t̂`. That binomial test assumes the `n` samples are **independent**.
 
-They are not. The real corpus asks four models the same prompt, so samples
-cluster by prompt and are correlated. On the shipped corpus
-(`real-2040-sym`, `data/runs/real_sym_train/`):
+Ours are not. Four models answer each task, so samples from one task are
+correlated:
 
 | | |
 |---|---|
-| Vulnerable calibration samples (`n`) | 206 |
-| …from distinct prompts | **67** (≈ 3.1 samples per prompt) |
-| Certificate at α = 0.05 (sample-level) | `t̂ = 0.828`, k = 4, p = 0.022 ✓ |
-| Certificate at α = 0.10 (sample-level, **shipped**) | `t̂ = 0.776`, k = 13, p = 0.043 ✓ |
-| Held-out test split, realized miss rate at α = 0.05 | 9/107 = **8.4%** |
-| Held-out test split, realized miss rate at α = 0.10 | 14/107 = **13.1%** |
-| Task-group cluster bootstrap, test miss rate at α = 0.05 | 95% CI 0.9%–18.4% |
+| Vulnerable calibration samples | 206, in **66 task groups** (≈ 3.1 per group) |
+| Within-group correlation of scores (ICC) | **0.57** → design effect 2.2, ≈ 94 independent samples' worth of evidence |
+| Per-sample certificate at α = 0.10 | `t̂ = 0.7763`, 56.4% coverage |
+| …its held-out miss rate | **13.1%** against the 10% it promised |
 
-Neither test-split overshoot is significant on its own (P = 0.088 and 0.18
-under independence), but both point the same way, and the misses
-concentrate in a few task groups (7 of 9 at α = 0.05 come from two CWE-798
-groups). The sample-level certificate is **optimistic**: its effective
-sample size is smaller than 206. Background: `docs/ENGINEERING_LOG.md`
-§12.10–12.11. This is the same reason `samples_per_prompt` stays at 1 (§12.7).
+## What was built
 
-## The goal
+**The task group is the unit of evidence.** A group's loss at threshold `t`
+is the fraction of its vulnerable samples scoring ≥ `t`. The risk is the
+mean loss over the groups that hold a vulnerable sample. Each threshold in
+LTT's fixed sequence is tested with the **Hoeffding–Bentkus** p-value for
+bounded losses, the p-value used in "Learn then Test" (Angelopoulos et al.,
+2021). Validity needs only *task groups* to be exchangeable; samples inside
+a group may be correlated in any way.
 
-A certificate whose guarantee survives the correlation, and which the README
-can state without a caveat.
+- `gate/ltt.py`: `calibrate_threshold(..., groups=...)` and
+  `hoeffding_bentkus_p_value`. Without `groups`, behaviour is unchanged.
+- `config.yaml`: `certificate: cluster` (default) or `sample`.
+- The pipeline derives each sample's task group from its prompt id. The
+  frontier, the operating point, the generator-shift experiment and
+  scan-time `--alpha` all use the cluster-aware test.
+- `calibration.json` records `method` and `n_vuln_groups`. `codegate info`,
+  the terminal, JSON and PDF reports all name the method.
+- `scripts/run_eval.py` reports the held-out miss rate per sample and per
+  task group, with a bootstrap interval that resamples whole groups.
 
-## Candidate approaches (to evaluate, not yet chosen)
+Two candidate approaches from the original plan were not used:
+- **Design-effect correction:** it rests on an estimated correlation that
+  the certificate would have to trust.
+- **"Any miss in the group" with an exact binomial:** valid, but it gave
+  less coverage at every α except 0.05, where the two tie.
 
-1. **Prompt as the unit.** Count a prompt as "missed" if any of its
-   vulnerable samples scores above `t̂`, and run LTT over prompts. This is
-   exact under prompt-level exchangeability, but much stricter. On the
-   current data it **does not certify at either α** with the current
-   thresholds:
+## Evidence that it works
 
-   | α | prompts missed at shipped `t̂` | max tolerated (n = 67) | prompts needed at k = 0 |
-   |---|---|---|---|
-   | 0.05 | 3 | 0 | 59 |
-   | 0.10 | 8 | 2 | 29 |
+**It keeps its promise where the old test did not.** In simulation (66
+groups sized like ours, α = 0.10, δ = 0.05, 400 runs per setting), the share
+of runs that certified a threshold truly missing more than α was:
 
-   It would need a higher `t̂` (less coverage), more task groups, or both.
-2. **Per-prompt miss fraction.** Use each prompt's fraction of vulnerable
-   samples auto-approved as a bounded loss in `[0, 1]`, and certify its
-   mean with a bound for bounded variables (Hoeffding–Bentkus, or the
-   bounded-loss form of LTT). This uses partial information within a
-   prompt, so it is less strict than (1). This is the leading candidate.
-3. **Design-effect correction.** Estimate the intra-prompt correlation `ρ`
-   and use `n_eff = n / (1 + (m − 1)ρ)`. Simple, but it rests on an
-   estimated `ρ` that the certificate itself would have to trust. Probably
-   better as a diagnostic than as the certificate.
-4. **Grow the independent unit.** More task groups (≥ 59 vulnerable
-   calibration prompts, i.e. more groups per CWE) make (1) or (2) feasible
-   at α = 0.05. This is complementary to the above.
+| within-group correlation | per-sample (old) | cluster-aware (new) |
+|---|---|---|
+| 0.0 | 0.020 | 0.000 |
+| 0.5 | **0.085** | 0.000 |
+| 0.8 | **0.092** | 0.000 |
+| 0.95 | **0.120** | 0.000 |
 
-## Definition of done
+The allowed rate is 0.05.
 
-- The chosen bound is implemented in `gate/` beside `calibrate_threshold`,
-  with tests asserting structure and known analytic cases, never model values.
-- `calibration.json` records which certificate type was used.
-- A cluster bootstrap on the held-out test split is reported next to the
-  certificate (`scripts/run_eval.py`).
-- `README.md`'s guarantee sentence matches what is certified, with no caveat.
+**It holds on data it never saw.** At the shipped threshold (`t̂ = 0.8276`,
+α = 0.10), 8.4% of vulnerable test-split samples are auto-approved, or 6.8%
+averaged per task group (95% cluster bootstrap 0.8–15.2%). Both are within
+the 10% target.
 
-## Starting points in the code
+**Generator shift.** The experiment was fixed to calibrate on the
+calibration split and judge each held-out model on data the ranker never
+trained on. Three of four models stay within 10% (2.4%, 2.9%, 5.6%).
+Codegemma comes in at 11.0% (10 of 91, P = 0.43 under a true 10% rate, so
+within noise). The old certificate gave 13.2% for codegemma on the same
+experiment.
 
-- `src/codegate/gate/ltt.py::calibrate_threshold` — the current sample-level test.
-- `src/codegate/research/eval/frontier.py::compute_frontier` — runs LTT per α.
-- `src/codegate/research/pipeline.py::run_full_pipeline` — the calibration
-  split carries `prompt_id`, so the cluster is already available there.
-- `data/runs/real_sym_train/` — the corpus and scores all numbers above come
-  from (git-ignored; regenerate with the commands in ENGINEERING_LOG §12.10).
+**The cost.** Coverage drops from 56.4% to 48.9% at α = 0.10. At α = 0.05
+the honest certificate approves only 29.2%, which is why the shipped
+operating point stays at 0.10.
+
+## What would improve it
+
+- **More task groups.** The group is the unit of evidence, so more tasks
+  (not more samples per task) is what buys coverage and would make α = 0.05
+  practical.
+- **Exchangeability of tasks** is now the assumption that matters. The tasks
+  are hand-written, so whether they represent future code is a judgement
+  about the prompt bank, not something the statistics can check.

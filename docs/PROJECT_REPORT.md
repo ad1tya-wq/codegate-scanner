@@ -149,10 +149,20 @@ hypothesis testing** over a labelled calibration set:
 The result is `t̂` with `P(R(t̂) ≤ α) ≥ 1 − δ`. The guarantee is
 **distribution-free** (no assumption about how scores are distributed) and
 **finite-sample** (valid at the actual `n`, not only as `n → ∞`). It
-assumes the calibration samples are **exchangeable** with the code the tool
-will later see. In practice that means independent draws from the same
-distribution, and this assumption is the project's main open issue
-(section 10).
+assumes the calibration data is **exchangeable** with the code the tool
+will later see.
+
+CodeGate's certificate is **cluster-aware**. Several models answer each
+task, so samples from one task group are correlated (measured intra-group
+correlation 0.57 on the shipped corpus). The standard test treats every
+sample as independent and becomes optimistic. In simulation it certified
+thresholds that really missed more than α in 8.5–12% of runs, against the
+5% allowed. So CodeGate counts each task group once. A group's loss is the
+fraction of its vulnerable samples above `t`, the risk is the mean over
+groups, and each threshold is tested with the Hoeffding–Bentkus p-value
+for bounded losses (the one the LTT paper uses). That needs only *task
+groups* to be exchangeable, which kept its promise in every simulated
+setting. Section 8.9 tells how this was found.
 
 How much data is needed: with zero misses (`k = 0`), certifying requires
 `(1 − α)^n ≤ δ`, so at α = δ = 0.05 the minimum is **59 vulnerable
@@ -219,7 +229,7 @@ Repository layout:
 | `scripts/` | Corpus generation, relabelling, training from a shipped corpus, evaluation, corpus repair |
 | `data/prompts/` | The prompt bank (YAML) |
 | `data/model/` | The shipped model and certificate |
-| `tests/` | 417 automated tests |
+| `tests/` | 435 automated tests |
 | `examples/vulnerable_app/` | Demo target with known ground truth |
 
 ---
@@ -480,9 +490,12 @@ the same interface.
 
 ### 4.6 Calibration and the certificate
 
-`gate/ltt.py::calibrate_threshold` implements section 2.2 exactly. The
-candidate thresholds are the unique calibration scores, plus +∞ (approve
-nothing, always certifiable) as the starting point. The function records a
+`gate/ltt.py::calibrate_threshold` implements section 2.2 exactly. Given
+each sample's task group (its prompt id minus the flavor), it runs the
+cluster-aware test; without groups, it runs the per-sample binomial test.
+`config.yaml`'s `certificate: cluster` selects the first. The candidate
+thresholds are the unique calibration scores, plus +∞ (approve nothing,
+always certifiable) as the starting point. The function records a
 full trace of (threshold, k, p-value, certified). The pipeline runs it
 at the configured operating point and also across a **frontier** of α
 values (0.05, 0.10, 0.20, 0.30), recording the threshold and coverage at
@@ -490,7 +503,8 @@ each.
 
 `research/artifacts.py` writes `calibration.json`: `t_hat`, `alpha`,
 `delta`, `n_vuln_calib`, `ranker_id`, `corpus_version`, `is_provisional`,
-`created_at`, and the whole frontier. The frontier is what powers scan-time
+`created_at`, the whole frontier, the certificate `method`, and
+`n_vuln_groups`. The frontier is what powers scan-time
 `--alpha`. A user can ask for any α that LTT actually certified. An α that
 was not certified is refused with a list of the valid ones, and thresholds
 are **never interpolated**, because an interpolated threshold carries no
@@ -579,7 +593,7 @@ codegate calibrate [--real] [--out-dir DIR]     # rebuild model + certificate (d
 
 - **Test-driven fixes.** Every defect fix in the oracle work started as a
   failing test reproducing the real sample. The test was then made to pass,
-  and the full suite rerun. The suite has **417 tests**. The largest file,
+  and the full suite rerun. The suite has **435 tests**. The largest file,
   `tests/test_oracle_ground_truth.py` (151 tests), pins hand-verified labels
   for every defect found on real data. Most detection tests have a
   deliberately safe twin, so a loosened detector shows up as a failure.
@@ -718,6 +732,21 @@ Windows. Fixed by never stubbing a standard-library name. No shipped label
 was affected, because no corpus sample imports a platform-absent standard
 module.
 
+### 8.9 A certificate that was right on paper and optimistic in practice
+
+The first real certificate passed its own test, but on held-out data its
+α = 0.10 threshold auto-approved 13.1% of vulnerable code. The cause was
+structural, not bad luck. Four models answer each task, so the 206
+vulnerable calibration samples are 66 correlated clusters (intra-group
+correlation 0.57). The per-sample binomial test counted them as 206
+independent draws. A seeded simulation confirmed it: under that
+correlation the test certified thresholds that really missed more than α
+in 8.5–12% of runs, against the 5% it promises. The cluster-aware
+certificate (section 2.2) held in every setting, and on the real data it
+stays within target. While building it, the generator-shift experiment
+turned out to calibrate and measure on the ranker's own training samples;
+it now uses the calibration split and unseen data only.
+
 ---
 
 ## 9 · Results
@@ -740,39 +769,37 @@ first repairs, and is 6.5–6.7% now.
 
 | α | t̂ | coverage | vulnerable calibration samples |
 |---|---|---|---|
-| 0.05 | 0.8276 | 48.9% | 206 |
-| **0.10 (shipped)** | **0.7763** | **56.4%** | 206 |
-| 0.20 | 0.7444 | 63.0% | 206 |
-| 0.30 | 0.6982 | 69.3% | 206 |
+Cluster-aware: 206 vulnerable calibration samples in 66 task groups.
 
-Independent check at α = 0.05: 4 of 206 vulnerable calibration samples
-score above t̂, and `binom.cdf(4, 206, 0.05) = 0.022 ≤ δ`. At α = 0.10: 13
-of 206, with p = 0.043.
+| α | t̂ | coverage | vulnerable calibration samples |
+|---|---|---|---|
+| 0.05 | 0.9088 | 29.2% | 206 (66 groups) |
+| **0.10 (shipped)** | **0.8276** | **48.9%** | 206 (66 groups) |
+| 0.20 | 0.7559 | 60.6% | 206 (66 groups) |
+| 0.30 | 0.7351 | 64.1% | 206 (66 groups) |
+
+For comparison, the per-sample binomial certificate it replaced gave
+t̂ = 0.7763 (56.4% coverage) at α = 0.10.
 
 ### 9.3 Generalization
 
 | Measure | Result |
 |---|---|
 | Ranker ROC-AUC, held-out test split | **0.891** (0.926 including training data) |
-| Generator shift (calibrate on 3, test on the 4th) | held for all four: realized 2.7% (codegemma), 3.5% (codellama), 2.2% (deepseek), 4.5% (qwen) vs α = 0.05 |
-| Demo app, static + gate only | precision 0.33, recall 1.00 |
+| Held-out test split, share of vulnerable code auto-approved | **6.8% per task group, 8.4% per sample** vs α = 0.10 (95% cluster bootstrap 0.8–15.2%) |
+| Generator shift (calibrate on 3, test the 4th on unseen data) | 3 of 4 within α = 0.10: 2.4% (deepseek), 2.9% (codellama), 5.6% (qwen); codegemma 11.0% (10 of 91, P = 0.43) |
+| Demo app, static + gate only | precision 0.25, recall 1.00 (3 of 14 auto-approved) |
 | Demo app, with verifier | not yet re-measured on the real model |
-| Held-out test split, realized miss rate | 8.4% at α = 0.05; 13.1% at α = 0.10 |
 
 ---
 
 ## 10 · Limitations and open issues
 
-**The certificate is somewhat optimistic.** LTT assumes independent
-calibration samples. The 206 vulnerable calibration samples come from only
-67 prompts, because four models answered each one, so they are correlated
-and the effective evidence is smaller than 206. The held-out realized miss
-rates (8.4% at α = 0.05, 13.1% at α = 0.10) exceed their targets. Neither
-is significant on its own (P = 0.088 and 0.18), but both point the same way,
-and most misses cluster in two credential tasks. That is why the shipped
-operating point is α = 0.10 rather than 0.05. A cluster-aware certificate is
-the next piece of work (branch `feat/cluster-aware-certificate`). On today's
-data its simplest form does not certify, so it is real design work.
+**Coverage.** The cluster-aware certificate is stricter: at α = 0.05 it
+certifies only 29% coverage, so the shipped operating point is α = 0.10.
+It assumes task groups are exchangeable with future tasks; the tasks are
+hand-written, so that is a judgement about how representative the prompt
+bank is, not something the statistics can check.
 
 **Other open items:**
 
@@ -792,16 +819,13 @@ data its simplest form does not certify, so it is real design work.
 
 ## 11 · Future work
 
-1. A **cluster-aware certificate** that treats the prompt as the unit of
-   evidence.
-2. **More task groups.** The prompt, not the sample, is the independent
-   unit, so certifying at α = 0.05 at prompt level needs at least 59
-   vulnerable calibration prompts with no misses.
-3. Re-measure the live verifier; record real token usage from the API's
+1. **More task groups.** The certificate counts each task once, so more
+   tasks, not more samples per task, is what buys coverage.
+2. Re-measure the live verifier; record real token usage from the API's
    `usage` field.
-4. Better harness values for path- and directory-validated code.
-5. A code-embedding ranker for more coverage at the same guarantee.
-6. More CWEs, each only once it has a reliable automatic ground truth.
+3. Better harness values for path- and directory-validated code.
+4. A code-embedding ranker for more coverage at the same guarantee.
+5. More CWEs, each only once it has a reliable automatic ground truth.
 
 ---
 
@@ -809,7 +833,7 @@ data its simplest form does not certify, so it is real design work.
 
 ```
 pip install -e ".[dev,research]"
-python -m pytest tests/ -q                                  # 417 tests
+python -m pytest tests/ -q                                  # 435 tests
 
 # label a corpus with the current oracles
 python scripts/relabel.py --generations <generations.parquet> --out-dir <dir>

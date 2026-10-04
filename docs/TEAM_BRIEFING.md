@@ -52,8 +52,9 @@ below a chosen `alpha` (10% in the shipped model), with a chosen
 confidence `1 - delta` (95%). This guarantee is **distribution-free and
 finite-sample** — it does not assume the ranker is good. A bad ranker just
 certifies a lower coverage (more gets escalated), never a false guarantee.
-What it does assume is that the calibration samples are independent
-draws; see Part 3 for where that bites. That is
+What it does assume is that the calibration data is representative.
+We count each task once as evidence, because answers to the same task are
+correlated; see Part 3 for why that mattered. That is
 the property a normal "pick a threshold that looked good on a validation
 set" approach does not have, and it is why we can say something no
 competing tool says: not just "here are the bugs we found," but a
@@ -179,17 +180,18 @@ attempt certified nothing. See Part 3.
 
 ## Current status
 
-Every phase is built and tested: 416 automated tests, all passing
+Every phase is built and tested: 435 automated tests, all passing
 locally. CI runs on `main`, so it runs once this branch is merged. The
 shipped model is now **trained and certified on real LLM-generated code**:
 
 | | |
 |---|---|
 | Corpus | 2,040 samples: 510 prompts answered by each of 4 local models (qwen2.5-coder, deepseek-coder, codellama, codegemma) |
-| Certificate | `t_hat = 0.7763` at α = 0.10, δ = 0.05; 56% of calibration code auto-approved. α = 0.05 is also certified (`--alpha 0.05`) |
+| Certificate | `t_hat = 0.8276` at α = 0.10, δ = 0.05, cluster-aware over 66 task groups; 49% of calibration code auto-approved. α = 0.05 is also certified (`--alpha 0.05`, 29% coverage) |
+| Held-out check | 6.8% per task (8.4% per sample) of unseen vulnerable code auto-approved, against 10% |
 | Ranker accuracy | ROC-AUC 0.891 on held-out data |
-| Generator shift | Calibrated on 3 models, tested on the 4th: held for all 4 |
-| Demo app | Catches every vulnerability (recall 1.00); precision 0.33 before the verifier |
+| Generator shift | Calibrated on 3 models, tested on the 4th (unseen data): 3 of 4 within 10%; codegemma 11.0%, not significant |
+| Demo app | Catches every vulnerability (recall 1.00); precision 0.25 before the verifier |
 
 ## How we got here — the honest version
 
@@ -212,24 +214,29 @@ reused 404 stale samples. Both are fixed. The corpus was then trimmed so
 every model answered the same prompts: 206 vulnerable calibration samples,
 and the threshold certifies. Full record: `docs/ENGINEERING_LOG.md` §12.
 
-## The current open issue, stated plainly
+## The last problem we found, and how it was solved
 
-**The guarantee is somewhat optimistic.** LTT assumes calibration samples
-are independent. Ours cluster: the 206 vulnerable calibration samples come
-from 67 prompts, because four models answered each one. On held-out data
-the realized miss rate was 13.1% against the 10% target. That isn't
-significant on its own, but it points the same way. That is why we ship at
-α = 0.10 rather than 0.05, and it is disclosed in the README, not hidden.
+**The standard certificate was optimistic for our data.** LTT's usual test
+treats every calibration sample as independent. Ours cluster: the 206
+vulnerable calibration samples come from 66 tasks, because four models
+answered each one, and their scores correlate (0.57). That shrinks the
+real evidence to roughly 94 independent samples. In simulation the
+standard test then broke its own promise far more often than allowed,
+and on our held-out data its threshold missed 13.1% against a 10% target.
 
-## How it will be solved
+The fix: **count each task once.** The cluster-aware certificate averages
+each task's miss fraction and tests that with the Hoeffding–Bentkus bound
+for bounded losses, the same bound the original LTT paper uses. In
+simulation it kept its promise in every setting. On held-out data it
+misses 6.8% per task (8.4% per sample), within 10%. It costs coverage:
+49% of code is auto-approved instead of 56%.
 
-1. **A cluster-aware certificate** that treats the prompt, not the
-   sample, as the unit of evidence (branch
-   `feat/cluster-aware-certificate`, planned). On today's data the
-   simplest version doesn't certify yet, so this is real design work.
-2. **More prompts, not more samples per prompt** — the independent unit is
-   the prompt, so that is what has to grow.
-3. **Smaller items:** 32% of safe command-execution samples still can't be
+## What's left
+
+1. **More tasks, not more samples per task** — the task is the unit of
+   evidence, so that is what buys coverage, and what would make α = 0.05
+   practical (29% coverage today).
+2. **Smaller items:** 32% of safe command-execution samples still can't be
    judged by the harness; the live verifier hasn't been re-measured on
    the real model; the Groq price table is still a placeholder; and
    semgrep misses one `%`-formatted SQL pattern split across a `with`

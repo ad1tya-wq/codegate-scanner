@@ -64,8 +64,9 @@ decision threshold with a provable risk bound. Concretely:
 This means the certificate's validity doesn't depend on the ranker being
 good — a bad ranker just certifies a lower coverage (more gets
 escalated), never a false guarantee. What it does depend on is the
-calibration samples being exchangeable draws (see the caveat under
-[Current metrics](#current-metrics)). That's the actual point of using a
+calibration data being representative. CodeGate counts each *task* as one
+piece of evidence, however many models answered it, because answers to
+the same task are correlated (see [Current metrics](#current-metrics)). That's the actual point of using a
 conformal method instead of just picking a threshold that "looks right"
 on a validation set.
 
@@ -209,28 +210,32 @@ PNGs land in `data/eval/` (gitignored — regenerate locally with
 | Oracle accuracy on ground-truth fixtures | **6/6** | The three oracles (SQLi, cmdi, creds) agree with their textbook examples |
 | Corpus size / vulnerable rate / abstentions | **2,040 / 26.9% / 6.7%** | Real code from 4 local models (qwen2.5-coder, deepseek-coder, codellama, codegemma), 510 prompts each; abstentions are samples no oracle could judge, excluded rather than counted as safe |
 | Ranker separation (ROC-AUC), held-out test split | **0.891** | How well the score separates vulnerable from safe code the ranker never saw (0.926 including its training data) |
-| Certified threshold | **t̂ = 0.7763 @ α = 0.10, δ = 0.05** | Of vulnerable functions, at most 10% score above this, with 95% confidence; 56% of calibration code clears it. α = 0.05 is also certified (t̂ = 0.8276) and available via `--alpha 0.05` |
-| Generator shift (calibrate on 3 models, test on the 4th) | **held for all 4** | Realized miss rates 2.2–4.5% against α = 0.05 on the model left out |
-| End-to-end scan vs. real ground truth, static + gate only | **precision 0.33, recall 1.00, F1 0.50** | Catches every real vulnerability in the demo app; escalates more safe functions than strictly needed, which costs LLM calls, not misses |
+| Certified threshold | **t̂ = 0.8276 @ α = 0.10, δ = 0.05** (cluster-aware, 66 task groups) | Of vulnerable functions, at most 10% score above this, with 95% confidence; 49% of calibration code clears it. α = 0.05 is also certified (t̂ = 0.9088, 29% coverage) via `--alpha 0.05` |
+| Held-out check of that guarantee | **6.8% per task group, 8.4% per sample** | Share of vulnerable test-split code the threshold auto-approves, against the 10% target (95% cluster bootstrap 0.8–15.2%) |
+| Generator shift (calibrate on 3 models, test on the 4th, unseen data only) | **3 of 4 within α = 0.10** | Realized 2.4%, 2.9%, 5.6%, and 11.0% for codegemma (10 of 91; not significant, P = 0.43) |
+| End-to-end scan vs. real ground truth, static + gate only | **precision 0.25, recall 1.00, F1 0.40** | Catches every real vulnerability in the demo app; the strict threshold escalates 11 of 14 functions, which costs LLM calls, not misses |
 | End-to-end scan vs. real ground truth, **with LLM verifier** | *not yet re-run on the real model* | Was precision 1.00 / recall 1.00 on the earlier simulated model; needs a Groq key and live API calls to re-measure |
 
-**Open caveat.** LTT's guarantee assumes the calibration samples are
-independent draws. Here the 206 vulnerable calibration samples come from 67
-prompts answered by four models, so they are correlated, and the
-certificate is somewhat optimistic. On the held-out test split the realized
-miss rate was 13.1% at α = 0.10 (not significant on its own, but in the
-same direction). A cluster-aware certificate is planned on
-[`feat/cluster-aware-certificate`](https://github.com/ad1tya-wq/codegate-scanner/blob/feat/cluster-aware-certificate/docs/cluster-aware-certificate/README.md);
-details in `docs/ENGINEERING_LOG.md` §12.10–12.11.
+**Why the certificate is cluster-aware.** The 206 vulnerable calibration
+samples come from 66 task groups, because four models answered each task,
+and their scores are correlated within a group (intra-group correlation
+0.57, so ≈ 94 independent samples' worth of evidence). The standard
+per-sample LTT test treats them as 206 independent draws. In simulation
+under that correlation it certified thresholds that really missed more
+than α in 8.5–12% of runs, against the 5% it promises. On our data its
+α = 0.10 threshold missed 13.1% of held-out vulnerable code. CodeGate
+instead counts each task group once (Hoeffding–Bentkus over per-group miss
+fractions), which kept its promise in every simulated setting and stays
+within target on held-out data. The cost is coverage: 49% of code
+auto-approved instead of 56%. Details: `docs/ENGINEERING_LOG.md` §13 and
+[`docs/cluster-aware-certificate/README.md`](docs/cluster-aware-certificate/README.md).
 
 ## Future improvements
 
-- **A cluster-aware certificate** whose guarantee survives correlated
-  calibration samples (see the caveat above), so the headline α can
-  return to 0.05 without qualification.
-- **More task groups** — the independent unit is the prompt, not the
-  sample, so certifying at α = 0.05 at prompt level needs at least 59
-  vulnerable calibration prompts with zero misses (67 today, 3 missed).
+- **More task groups** — the task, not the sample, is the unit of
+  evidence, so more tasks (not more samples per task) is what buys
+  coverage. Today α = 0.05 certifies only 29% coverage from 66 vulnerable
+  calibration groups.
 - **Published cost/token accounting**, backed by real Groq pricing
   (currently a placeholder — see `report/accounting.py`) and real
   per-call token usage from the API's own `usage` field, not just the
