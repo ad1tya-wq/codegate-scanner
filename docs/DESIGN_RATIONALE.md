@@ -211,40 +211,87 @@ failure mode (firewall rules, `OLLAMA_HOST` binding, LAN reachability)
 at the cost of the host needing Python and the repo, not just Ollama —
 a trade made explicitly and documented in `docs/OLLAMA_SETUP.md`.
 
+### Hurdle 8: the first real corpus certified nothing — and the cause was the labeller, not the data size
+
+The first real corpus (516 samples, September 2026) produced no
+certified threshold at any α up to 0.30: only 8 vulnerable samples
+reached the calibration split. "Too little data" was the obvious reading
+and the wrong one. Testing the oracles directly found four defects:
+harnesses that called every function with a fixed number of arguments
+(~44% of prompts could never be judged), a SQL check based on row counts
+(injectable DELETEs labelled safe, safe `COUNT(*)` queries labelled
+vulnerable), an entropy gate that rejected realistic passwords, and a base
+model that wrote no vulnerable code at all. Re-labelling the *same* 516
+samples after the fixes raised the vulnerable calibration count from 8 to
+25 without generating anything. Only then was scaling worth paying for.
+The lesson: when a statistical method says "not enough evidence", check
+whether the evidence is being thrown away before asking for more of it.
+
+### Hurdle 9: a resume feature that reused stale answers
+
+The 2,160-sample generation run was written into a folder still holding
+the previous run's checkpoint. Resume recognised finished samples by an
+id built from the prompt id and the model, not the prompt's *wording*,
+so it silently reused 404 old answers: 78 to prompts reworded since, 189
+with a split reassigned since. Nothing errored, and the file looked
+complete. Found by checking every sample's split against the prompt bank
+and diffing code against the old corpus. Fixed by fingerprinting each
+prompt's wording into the checkpoint. The corpus was repaired with a
+committed, reproducible script, and then trimmed so all four models
+answer exactly the same prompts.
+
+### Hurdle 10: a labeller that called vulnerable code safe
+
+Reading the full corpus by hand showed the credentials oracle labelling
+51 of 60 vulnerable samples safe, with the planted secret sitting
+verbatim in the code. It was in shapes the rules never reached: bytes
+literals, (user, password) tuples, webhook URLs, connection strings.
+Missed vulnerable labels are the dangerous direction for this project,
+because they make the certificate report a lower miss rate than the
+scanner really has. Every rule added was written test-first with a safe
+twin, and was checked against every near-miss sample in three corpora.
+All changed verdicts moved from SAFE to VULNERABLE, and no new false
+positives appeared.
+
+### Hurdle 11: a Windows-only success
+
+All labelling ran on Windows. The first CI run of the new oracle code on
+Linux showed every command-injection check failing. The helper that
+supplies stand-ins for missing third-party modules had also faked
+`msvcrt`, which Python's own `subprocess` imports to detect Windows, so on
+Linux it took its Windows code path. Fixed by never faking a
+standard-library module. No shipped label was affected, but the same
+lesson as Hurdle 3 applies: "works on our machine" is not a result until
+a clean, different environment agrees.
+
 ---
 
 ## 3 · Future improvements
 
 Ranked roughly by how load-bearing they are to the project's central
-claim (the certificate), not by how easy they are to build.
+claim (the certificate), not by how easy they are to build. Retraining on
+real data, held-out ranker evaluation and scan-time `--alpha` were on
+this list and are done (`ENGINEERING_LOG.md` §12).
 
-1. **Retrain on the real corpus (Track A).** Everything downstream of
-   the model is currently `PROVISIONAL`, by design and by disclosure —
-   this is the one item that actually resolves that, not just works
-   around it. A file swap, not a redesign, by construction (see
-   `ENGINEERING_LOG.md` section 6).
-2. **Held-out ranker evaluation.** `ranker_separation_metrics`'s
-   AUC=1.00 today is computed over the full corpus, not a held-out
-   split — an honest limitation stated in the code and in the README,
-   not hidden. Threading a `split` column through
-   `scores_r2.parquet` and re-scoring on `test` only would turn this
-   from a memorization signal into a real generalization estimate.
-3. **A principled default `--alpha`.** The CLI currently refuses to
-   override the certified threshold post hoc (see `cli.py::scan`,
-   which rejects `--alpha` outright with an explanation) because doing
-   it correctly means recomputing from the persisted LTT trace against
-   a real cost-coverage frontier — deferred, not skipped, until real
-   data makes that frontier meaningful.
-4. **Real Groq pricing and real per-call token accounting.** The cost
-   estimate in every report is explicitly flagged `is_estimate: true`;
-   the price table is a placeholder pending verification against
-   Groq's current pricing page, and token counts use a chars/4
-   heuristic rather than the API's own `usage` field. Both are
-   solvable without touching the certificate machinery at all.
-5. **Corpus scale**, from 540 to the original 1,620-sample target
-   (3 generations per prompt instead of 1) — deliberately deferred
-   until the smaller loop proves out end to end on real data, which it
-   now has (mechanically, on simulated data).
+1. **A cluster-aware certificate.** LTT assumes independent calibration
+   samples. Ours cluster, because four models answered each prompt: 206
+   vulnerable calibration samples come from 67 prompts. So the shipped
+   certificate is somewhat optimistic, and it ships at α = 0.10 rather than
+   0.05 for that reason. The fix is a certificate whose unit of evidence is
+   the prompt (branch `feat/cluster-aware-certificate`). On today's data
+   its simplest form does not certify yet.
+2. **More task groups, not more samples per prompt.** The prompt is the
+   independent unit, so that is what has to grow. Certifying α = 0.05 at
+   prompt level needs at least 59 vulnerable calibration prompts with no
+   misses.
+3. **Better harness values for path- and directory-validated code.** 32%
+   of safe command-execution samples still can't be judged, which loses
+   exactly the hard negatives the ranker learns most from.
+4. **Re-measure the live verifier on the real model**, and record real
+   per-call token usage from the API's `usage` field instead of a
+   characters ÷ 4 estimate against a placeholder price table.
+5. **A code-embedding ranker.** The guarantee holds for any ranker; a
+   better one buys more coverage at the same α.
 6. **Broader CWE coverage.** Each additional CWE needs its own
    reliable, automatable ground-truth signal before it can be added —
    the project's standard (dynamic detonation where possible, a
@@ -265,7 +312,8 @@ strongest objection to each and the response.
 construction — it's a property of the fixed-sequence hypothesis test
 over the calibration data, independent of how good the underlying
 ranker is. A bad ranker certifies a *lower coverage* (more escalated,
-fewer auto-approved) — it cannot produce a false guarantee. This is
+fewer auto-approved) — it cannot produce a false guarantee, provided the
+calibration samples are exchangeable with what the tool will see. This is
 categorically different from picking a threshold that happened to score
 well on a held-out set, which has no such property and can silently
 stop generalizing the moment the input distribution shifts.
@@ -278,40 +326,51 @@ whether the certificate survives a distribution shift, and
 `test_run_shift_experiment_detects_certificate_break_under_severe_shift`
 proves the framework *notices* when it doesn't hold, rather than
 silently reporting a false guarantee. A "normal" threshold has no
-mechanism to detect this at all.
+mechanism to detect this at all. On the real corpus, calibrating on three
+models and testing on the fourth held for all four (realized miss rates
+2.7%, 3.5%, 2.2%, 4.5% against α = 0.05).
+
+The honest limit of this claim is the exchangeability assumption itself.
+Our calibration samples are correlated by prompt, which makes the
+certificate somewhat optimistic. On held-out data the realized miss rate
+was 13.1% against the shipped 10%. That is why it ships at 0.10, and why
+the cluster-aware certificate is first on the future-work list.
 
 ### Claim: the triage design is what makes LLM-based verification economically viable, not just accurate
 
 **Point.** The real-world alternative to "escalate only what a
 certificate can't clear" is either exhaustive LLM review (correct, but
 doesn't scale to CI-pipeline latencies or costs) or static-analysis-only
-(scales fine, but has no mechanism to bound what it's missing). The
-demo app's own measured numbers make the tradeoff concrete: static +
-gate alone gets recall 1.00 / precision 0.50 (catches everything real,
-also flags three safe functions); adding one LLM call per escalated
-unit — 5 calls total, cached thereafter — brings precision to 1.00
-without spending a single additional call on the 9 units the gate
-already cleared with a certificate.
+(scales fine, but has no mechanism to bound what it's missing). On the
+demo app, the shipped real-data model auto-approves 6 of 14 functions with
+no LLM call at all, under a certificate that at most 10% of vulnerable
+functions get auto-approved. It escalates the other 8 to the verifier,
+one cached call each. Static + gate alone already reaches recall 1.00,
+with precision 0.33: every real vulnerability is caught, and some safe
+code is escalated. The verifier's job is to clear those, and its effect on
+this model has not been re-measured yet. On the earlier simulated model
+it took precision from 0.50 to 1.00.
 
 ```mermaid
 flowchart LR
-    A["14 functions\n(examples/vulnerable_app/)"] --> B{"Certified gate"}
-    B -->|"9 auto-approved\n0 LLM calls"| C["Certificate:\n≤5% of these\nare vulnerable\n(95% confidence)"]
-    B -->|"5 escalated"| D{"LLM verifier\n5 calls, cached"}
-    D -->|"2 confirmed"| E["Real findings"]
-    D -->|"3 cleared"| F["Correctly\nleft alone"]
+    A["14 functions\n(examples/vulnerable_app/)"] --> B{"Certified gate\n(alpha = 0.10)"}
+    B -->|"6 auto-approved\n0 LLM calls"| C["Certificate: at most 10%\nof vulnerable functions\nget here (95% confidence)"]
+    B -->|"8 escalated"| D{"LLM verifier\n8 calls, cached"}
+    D -->|"confirmed"| E["Real findings"]
+    D -->|"cleared"| F["Correctly\nleft alone"]
 ```
 
-**Counter.** *"With only 14 functions, isn't 5 calls a toy example that
+**Counter.** *"With only 14 functions, isn't this a toy example that
 doesn't prove anything about scale?"* Fair, and stated as such — this is
 a demonstration on a small, hand-built target with known ground truth,
 not a claim about a 10,000-function monorepo. What *does* generalize is
 the mechanism: the fraction requiring an LLM call is exactly the
 fraction the certificate can't clear, and that fraction is a property of
-the ranker's quality and `alpha`, not of codebase size — a larger
-codebase with a similar vulnerability rate would see a similar
-*proportion* escalated, which is the actual cost claim (bounded LLM
-spend as a function of `alpha`, not of lines of code).
+the ranker's quality and `alpha`, not of codebase size. On the real
+corpus's calibration data the shipped threshold auto-approves 56% of
+functions, so a larger codebase like it would see roughly 44% escalated.
+That is the actual cost claim: bounded LLM spend as a function of
+`alpha`, not of lines of code.
 
 ### Claim: dynamic detonation labels are stronger ground truth than pattern-matching alone
 
@@ -346,17 +405,20 @@ mode a "certified miss-rate" tool exists to prevent, applied to itself.
 `calibration.json` carries `is_provisional` as a field in the artifact,
 not a comment; `codegate info` and every PDF cover page surface it;
 `CostSummary.is_estimate` is a real field a report renderer must read,
-not a docstring note it could silently drop; `--alpha` is rejected
-outright rather than silently ignored when the override isn't actually
-implemented yet.
+not a docstring note it could silently drop; `--alpha` accepts only α
+values LTT actually certified and refuses the rest with the list of valid
+ones, rather than interpolating a threshold that would carry no
+guarantee.
 
 **Counter.** *"Isn't 'our numbers are provisional' just an excuse for
-not having finished the project?"* The distinction is that the
-mechanism is fully built, tested, and — per Hurdle 4 — verified against
-a real, live LLM endpoint; only the *training data* underneath the
-ranker is interim. That's a normal, disclosed state for any ML system
-mid-development, not a gap in the engineering. The alternative — shipping
-a certificate without the `is_provisional` flag because the data isn't
-ready yet — would be strictly worse: a confident-looking number nobody
-should trust, which is the specific failure this project's entire design
-exists to prevent.
+not having finished the project?"* For most of the build the model was
+calibrated on a simulated corpus and flagged provisional, while the
+mechanism was fully built and verified against a live LLM endpoint. The
+flag was lifted only when a real corpus certified, in October 2026, and
+the same discipline continues past that point. The README states the
+clustering caveat beside the headline number, the verifier figures are
+marked "not yet re-measured" rather than carried over from the simulated
+model, and the shipped α was relaxed to 0.10 instead of quoting 0.05 with
+a footnote. A confident-looking number nobody should trust is the
+specific failure this project's design exists to prevent, and that
+applies to its own headline too.
