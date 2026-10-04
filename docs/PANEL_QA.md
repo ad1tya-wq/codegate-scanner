@@ -38,69 +38,60 @@ It's deliberately simple:
    ([`research/generation/harness.py:114`](../src/codegate/research/generation/harness.py)).
    `run_full_pipeline` fits the ranker only on `split == "train"` rows and
    calibrates LTT only on `split == "calib"` rows
-   ([`research/pipeline.py:254-262`](../src/codegate/research/pipeline.py)).
-   This matters: the ranker never sees a calibration-set sample during
-   training, which is what makes the calibration set a fair, exchangeable
-   sample for LTT's guarantee (see Part 3).
+   (`research/pipeline.py::run_full_pipeline`). The `test` split is used
+   by neither and serves as held-out data for the ranker's accuracy
+   (`scripts/run_eval.py`). This matters: the ranker never sees a
+   calibration-set sample during training, which is what makes the
+   calibration set a fair sample for LTT's guarantee (see Part 3).
 
-   **The exact arithmetic** (verified against `data/prompts/*.yaml` directly):
-   each of the 3 CWE files has 15 task-groups — 6 `train`, 5 `calib`, 4
-   `test` (the `test` split is defined and tagged but not consumed by any
-   code yet — reserved for a future held-out generalization check, worth
-   saying plainly if asked rather than glossing over). 15 tasks × 3 CWEs =
-   45 task-groups × 3 flavors (vulnerable/neutral/near_miss) = **135
-   prompts**. × 4 generators × 1 sample/prompt = **540 samples**: 216
-   train / 180 calib / 144 test. 180 calib samples × ⅓ vulnerable-by-design
-   = **60 vulnerable calibration samples** — exactly `n_vuln_calib: 60` in
-   the shipped `calibration.json`. This is the same prompt bank and the
-   same split logic for *both* the simulated run and the real Ollama run —
-   the split is a property of the prompt, not of which backend generates
-   from it.
+   **The exact arithmetic** (verified against `data/prompts/*.yaml` and
+   the shipped corpus): each of the 3 CWE files has 60 task groups,
+   24 `train` / 24 `calib` / 12 `test`. 180 task groups × 3 flavors
+   (vulnerable/neutral/near_miss) = **540 prompts**, × 4 generators ×
+   1 sample/prompt = 2,160 planned samples. The shipped corpus is the
+   **2,040** of those that all four models answered (510 prompts × 4, see
+   below): 1,904 labelled after 136 abstentions, **206 vulnerable
+   calibration samples** (`n_vuln_calib: 206` in the shipped
+   `calibration.json`). The split is a property of the prompt, not of the
+   run.
 
 ### On exactly what data was the shipped model trained — an important distinction
 
-`codegate calibrate` (no `--real` flag — what actually produced the shipped
-model) uses `SimulatedBackend`
-([`cli.py:92-96`](../src/codegate/cli.py)), **not an LLM at all.** Looking
-at [`research/generation/backends.py:35-78`](../src/codegate/research/generation/backends.py),
-`SimulatedBackend` is a fixed dictionary of **9 hand-written code
-templates** — one per (CWE, flavor) pair for the 3×3 combination — with
-only the function name and argument name randomized from a small pool
-(`{handler, process, run_task, do_work}` × `{value, data, user_input,
-payload}`). No model runs; it's a deterministic template-filler.
+**Real LLM-generated code** since 2026-10-04: `corpus_version:
+"real-2040-sym"`, `is_provisional: false`. Four local models
+(`qwen2.5-coder:7b`, `deepseek-coder:6.7b`, `codellama:7b`,
+`codegemma:7b-instruct`) each answered the same 510 prompts. Every sample
+was labelled by the detonation oracles, and the ranker was trained on the
+`train` split and calibrated on `calib`.
 
-So "540 simulated samples" means: **9 fixed code skeletons**, cosmetically
-renamed, not 540 independently-written pieces of code. This is worth being
-exact about if asked directly — it's also *why* `ROC-AUC = 1.0000` on this
-corpus isn't a strong ML result on its own: with only 9 underlying code
-shapes, near-perfect linear separability is closer to expected than
-impressive. `calibration.json` is explicit about this — `corpus_version:
-"simulated-v2"`, `is_provisional: true` — the certificate is real,
-correctly-computed math, on a synthetic distribution, disclosed as such
-everywhere it's shown. The Ollama corpus's job was to replace this with
-training data that's actually representative of what an LLM writes.
+Before that, the shipped model came from `codegate calibrate` without
+`--real`, which uses `SimulatedBackend`: **9 hand-written code templates**
+(one per CWE × flavor) with only names randomized. That is why its
+ROC-AUC read 1.0000 — 9 underlying shapes are trivially separable. It
+was always disclosed as `simulated-v2` / provisional, and it is now
+replaced.
 
-**Performance — the shipped model** (`simulated-v2`, what the demo and
-report actually run against, per `data/model/calibration.json` and
-`data/eval/metrics.json` as of this write-up):
+**Performance — the shipped model** (`real-2040-sym`; `python
+scripts/run_eval.py`, `docs/ENGINEERING_LOG.md` §12.10–12.11):
 
 | Metric | Value |
 |---|---|
-| Corpus size | 540 samples (180 vulnerable / 360 safe, 33.3% by design) |
-| ROC-AUC | 1.0000 (mean score: vulnerable 0.349, safe 0.824 — clean separation) |
-| Certified `t_hat` | 0.6613 at α=0.05, δ=0.05 |
-| `n_vuln_calib` | 60 |
+| Corpus | 2,040 samples (510 prompts × 4 models); 6.7% abstained; 26.9% of decided samples vulnerable |
+| Ranker ROC-AUC, held-out test split | **0.891** (0.926 including its own training data) |
+| Certified `t_hat` (shipped operating point) | **0.7763 at α = 0.10, δ = 0.05**; 56.4% of calibration code auto-approved |
+| Also certified | 0.8276 at α = 0.05 (48.9% coverage), via `codegate scan --alpha 0.05` |
+| `n_vuln_calib` | 206 |
+| Generator shift (calibrate on 3 models, test the 4th) | held for all 4 (realized 2.2–4.5% vs α = 0.05) |
 | Oracle accuracy (fixtures) | 6/6 |
-| Demo-app precision (static+gate only → +verifier) | 0.50 → 1.00 |
-| Demo-app recall | 1.00 → 1.00 |
+| Demo app, static + gate only | precision 0.33, recall 1.00 |
+| Demo app, with the verifier | not yet re-measured on this model (simulated model: 1.00 / 1.00) |
 
-**Performance — the real-Ollama retrain attempt** (`real-540`, the one your
-teammate's data produced — see below): ROC-AUC ≈ 0.91 over 370 decided
-samples, but **`t_hat = None` at every tested α (0.05/0.10/0.20/0.30)** —
-LTT refused to certify because only 8 vulnerable samples landed in the
-calibration split. This is why the shipped model is still `simulated-v2`,
-not the real-data model — full story in `ENGINEERING_LOG.md` §11 and Part 2
-below.
+**For comparison — the simulated model it replaced:** 540 samples,
+ROC-AUC 1.0000 (memorized), `t_hat` 0.6613 at α = 0.05, demo-app precision
+0.50 → 1.00 with the verifier. **And the first real attempt** (`real-540`,
+2026-09-02): `t_hat = None` at every α, because only 8 vulnerable samples
+reached calibration. Part 2 explains why that was the labeller, not the
+data size.
 
 ### How is `t_hat` decided?
 
@@ -147,6 +138,17 @@ partway through doesn't restart from zero — the shortfall sits entirely on
 the prompt, not something recomputed per-run, so the real corpus split
 exactly mirrors the simulated corpus's split by construction.
 
+**The second run (2026-10-04), which the shipped model uses.** Same command,
+with a 60-group-per-CWE prompt bank and `codegemma:7b-instruct` replacing
+`starcoder2:7b`, which had produced zero vulnerable samples in 163
+attempts. A 107-sample pilot passed every gate first
+(`docs/PILOT_REVIEW.md`). The full run returned 2,156 of 2,160 samples.
+Because it was written into the folder that held the September run, a
+resume bug reused 404 September answers, 78 of them to prompts reworded
+since. Those 78 were dropped and the resume code fixed. Then every prompt
+not answered by all four models was dropped too, so each model is measured
+on identical questions: **2,040 samples**.
+
 ### What was the exact prompt?
 
 The raw `task` string from the prompt bank YAML, sent to Ollama verbatim —
@@ -161,9 +163,9 @@ flavor ([`data/prompts/sqli.yaml:5-8`](../data/prompts/sqli.yaml)):
 > Build the SQL by directly formatting the username into the query
 > string."*
 
-Each of the 15 tasks per CWE has its own distinct `vulnerable` /
+Each of the 60 tasks per CWE has its own distinct `vulnerable` /
 `neutral` / `near_miss` wording like this — genuinely different function
-signatures and scenarios per task, not one template reused across all 15.
+signatures and scenarios per task, not one template reused across all 60.
 (This is the real-generator path only — `SimulatedBackend` ignores this
 text entirely and draws from its own 9 fixed templates instead, see
 above.)
@@ -223,7 +225,9 @@ host-runs-everything"*):
 Labeling, ranker training, and calibration all then ran locally, on the
 main machine, against that one committed parquet file — the only thing
 that ever crossed between machines was generated code text, never
-execution.
+execution. The second run followed the same route: branches
+`corpus/pilot` and `corpus/real-540` (the latter holding the 2,160-sample
+run despite its name).
 
 ---
 
@@ -288,50 +292,38 @@ real through it, not just something you generated yourself.
 
 ### What's the main weakness right now?
 
-Worth separating two things that are easy to conflate: the shipped `t_hat
-= 0.6613` is not itself broken or in question — it's a correctly-computed
-LTT certificate, just calibrated against the simulated (9-template)
-corpus rather than real code (see Part 1). The actual weakness is narrower
-and more specific: **we don't yet have a certificate calibrated against
-real, LLM-generated code**, because the real-540 attempt at that specific
-goal came back `t_hat = None`.
+**The certificate treats correlated samples as independent.** The 206
+vulnerable calibration samples come from only 67 prompts, because four
+models answered each prompt. LTT's binomial test assumes independent draws,
+so the effective evidence is smaller than 206 and the certificate is
+somewhat optimistic. On the held-out test split, the share of vulnerable
+code auto-approved was 8.4% at α = 0.05 and 13.1% at α = 0.10. Neither is
+significant on its own (P = 0.088 and 0.18), but both point the same way,
+and most misses cluster in two credential tasks. That is why the shipped
+operating point is α = 0.10, not 0.05, and why a cluster-aware certificate
+is the next piece of work (branch `feat/cluster-aware-certificate`).
 
-The certified, shipped model is still calibrated on the **simulated**
-corpus, not the real one. The real-540 attempt produced `t_hat = None` at
-every tested α — LTT correctly refused to certify a threshold, because
-only **8 vulnerable samples** landed in its calibration split (115 total
-calibration samples, only 8 vulnerable). That's too thin an evidence base
-to certify anything with statistical honesty, and LTT is specifically
-designed to say "not yet" in that situation rather than manufacture a
-number anyway (see Part 3 — this is the mechanism working correctly, not
-failing).
-
-**Root cause, precisely**: two compounding factors, not one —
-1. The real corpus is small (516 samples total).
-2. The real corpus's abstention rate is high (28.3%, per the pipeline's own
-   warning) — the oracle is likely failing to invoke some generated
-   functions correctly (wrong entry-point name, or a fixture mismatch such
-   as an unexpected SQL table name in code the model wrote), meaning a
-   real chunk of every batch generated is currently *wasted*, not just
-   small.
+Two smaller ones:
+1. 32% of the *safe* command-execution samples still can't be judged. Their
+   input checks (an existing destination folder, a path under a base
+   directory) reject every test value the harness can construct. They are
+   excluded, not mislabelled, but they are exactly the hard negatives the
+   ranker learns most from.
+2. The live-verifier numbers have not been re-measured on the real model.
 
 ### Is the answer just "bigger dataset + better LLM"?
 
-**No — that's necessary but not sufficient, and it's not even the highest-
-leverage first step.** A bigger dataset directly raises the raw count, but
-at a 28.3% abstention rate, over a quarter of every new sample generated is
-still thrown away before it can even reach the calibration set. "Better
-LLM" doesn't touch this at all — the abstention gap is a bug in *our*
-harness's ability to correctly invoke and detonate whatever code a model
-writes, not a quality problem with the code the model writes. Two of this
-session's three fixes (extract_code, the cmdi harness bug) already
-measurably attack this abstention rate; the honest next step is continuing
-to harden oracle invocation (more plausible SQL table names in the
-fixture, more robust entry-point matching) *before* spending more hours
-generating more samples at the same wasteful rate. Scale only pays off
-once the abstention rate is under control — otherwise you're paying for
-more data and still not getting more *usable* data at anywhere near the
-rate you'd expect.
+**No — and the project now has the evidence.** The first real corpus
+(516 samples) certified nothing, and the obvious reading was "too small".
+Re-labelling those *same* 516 samples with repaired oracles took the
+vulnerable calibration count from 8 to 25 without generating a single new
+sample. The labeller had been dropping or mislabelling a large share of the
+data: fixed-arity harnesses, a row-count SQL check, an entropy gate on
+passwords. Only after that did scale pay off: the 2,040-sample corpus,
+labelled with the repaired oracles, gives 206. "Better LLM" helped in
+one specific place: `starcoder2`, a base completion model, produced no
+vulnerable code at all and was replaced. And the next limit isn't sample
+count, it's independence: more *prompts*, not more samples per prompt.
 
 ---
 
@@ -339,14 +331,16 @@ rate you'd expect.
 
 ### What exactly are α and δ?
 
-Both are set in `config.yaml`: **α = 0.05, δ = 0.05**.
+Both are set in `config.yaml`: **α = 0.10, δ = 0.05** (α was 0.05 until
+2026-10-04, and 0.05 is still certified and available via `--alpha 0.05`;
+see Part 2 for why the shipped point is 0.10).
 
 - **α (alpha)** is the *risk bound itself* — the maximum acceptable miss
   rate. Formally, `R(t) = P(auto-approved | truly vulnerable)`: of all the
   genuinely vulnerable code that *could* be auto-approved at threshold
   `t`, what fraction actually is? CodeGate's certificate targets `R(t_hat)
-  <= 0.05` — at most 1 in 20 vulnerable functions slips through
-  auto-approval undetected.
+  <= 0.10` — at most 1 in 10 vulnerable functions slips through
+  auto-approval undetected (1 in 20 with `--alpha 0.05`).
 - **δ (delta)** is *how confident the certificate itself is allowed to be
   wrong*. The full guarantee is `P(R(t_hat) <= alpha) >= 1 - delta` — with
   δ=0.05, there's at least 95% confidence that the α bound actually holds.
@@ -365,15 +359,15 @@ A useful framing that doesn't require any ML background:
 
 > Imagine a factory quality-control line. A cheap sorting machine looks at
 > every part and decides "pass" or "send to a human inspector." You want a
-> *guarantee*: among everything the machine marks "pass," no more than 5%
-> are actually defective — and you want to be 95% sure that guarantee is
-> real, not a lucky fluke from testing it on too few parts.
+> *guarantee*: of all the defective parts that come down the line, no
+> more than 10% get marked "pass" — and you want to be 95% sure that
+> guarantee is real, not a lucky fluke from testing it on too few parts.
 >
 > You don't get that guarantee by trusting the machine's engineering, or by
 > eyeballing a chart. You get it by taking a batch of parts you *already
 > know the true answer for* (the calibration set), and asking, for a
 > candidate cutoff score: "if the machine's real miss rate at this cutoff
-> actually sat right at my 5% limit, how likely is it I'd see this few
+> actually sat right at my 10% limit, how likely is it I'd see this few
 > defects slip through in this specific batch just by chance?" If that
 > chance is small enough, you trust the cutoff. You try the strictest
 > cutoff first, then loosen it step by step, and the moment a cutoff fails
@@ -394,19 +388,21 @@ A useful framing that doesn't require any ML background:
   ranker just certifies a lower, less useful threshold (fewer things get
   auto-approved) — it never produces a *false* guarantee. This is exactly
   what let the team build and honestly demo the full scanner *before* real
-  training data existed (Bates et al., J. ACM 2021 — see below).
+  training data existed (Bates et al., J. ACM 2021 — see below). The one
+  thing it does assume is that calibration samples are exchangeable draws.
+  Correlated samples weaken it, which is the open issue in Part 2.
 - **Finite-sample exact, not asymptotic.** The certificate is valid for the
   calibration sample size actually on hand — relevant here specifically,
   since this project never has millions of labeled samples. An
   asymptotic-only guarantee ("valid as n → ∞") would be worthless at
-  n=115.
+  n = 206.
 - **Targets the actual metric that matters**, not a proxy. A security
   scanner's real risk is precisely "how many real bugs get silently waved
   through" — that's `R(t)` exactly, not accuracy, not AUC, not F1.
 - **It can honestly say "not yet."** `t_hat = None` isn't a failure of the
   method — it's the method correctly refusing to manufacture a guarantee
   it can't back with evidence, which is exactly what happened with the
-  real-540 corpus (Part 2). That refusal *is* the mechanism working as
+  first real corpus (Part 1). That refusal *is* the mechanism working as
   designed, and it's a genuinely rare property for a "security score" to
   have.
 
