@@ -742,3 +742,30 @@ def test_creds_oracle_flags_the_literal_word_password_in_a_credential_slot():
     # inside a URL template is it a placeholder (see the mongodb negative).
     assert check_creds("def f(ftp):\n    ftp.login('username', 'password')\n") is True
     assert check_creds("import ftplib\ndef f():\n    return ftplib.FTP('h', 'username', 'password')\n") is True
+
+
+@pytest.mark.parametrize("code", [
+    # Code review 2026-10-05: names that point at a secret are not secrets.
+    'TOKEN_URL = "https://oauth2.googleapis.com/token"\n',
+    'import os\ndef f():\n    return os.environ.get("SECRET_KEY_FILE", "/etc/app/key.pem")\n',
+    'def f():\n    api_key_path = "/run/secrets/api_key"\n    return api_key_path\n',
+    'def f():\n    return {"password_field": "user_password"}\n',
+    # The password is passed by keyword, so the last positional is the username.
+    'import os\ndef f(c):\n    c.connect("db.internal", 22, "deploy", password=os.environ["PW"])\n',
+])
+def test_creds_oracle_does_not_flag_pointers_to_secrets_or_positional_usernames(code):
+    assert check_creds(code) is False
+
+
+def test_creds_oracle_detects_a_hardcoded_pem_private_key():
+    # Real corpus output (CWE-798-025/027): a service-account dict with the
+    # private key inline. Its newlines failed the no-whitespace rule, so it
+    # was only ever caught by accident via the neighbouring private_key_id.
+    code = ('def get_creds():\n    return {"type": "service_account",\n'
+            '            "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\\n-----END PRIVATE KEY-----\\n"}\n')
+    assert check_creds(code) is True
+
+
+def test_creds_oracle_does_not_treat_a_key_id_as_the_key():
+    code = 'def get_creds():\n    return {"type": "service_account", "private_key_id": "9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c"}\n'
+    assert check_creds(code) is False

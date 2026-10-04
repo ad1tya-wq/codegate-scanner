@@ -605,7 +605,9 @@ code doesn't parse (an abstention, not a clearance). Otherwise returns
 - the password slot of a known credential call (`.login(u, pw)`,
   `HTTPBasicAuth`, `ftplib.FTP(h, u, pw)`, `set_password(pw)`), or the
   last positional argument of any call named like
-  `login|auth|credential|connect|bind` with two or more positional args;
+  `login|auth|credential|connect|bind` with two or more positional args,
+  unless the password is passed by keyword (then that last positional
+  argument is the username: `connect(host, 22, "deploy", password=...)`);
 - a secret-named string followed by a literal in any call
   (`set_config("license_key", "...")`, `os.environ.get("JWT_SECRET",
   "...")`, the hardcoded-fallback case);
@@ -617,7 +619,8 @@ code doesn't parse (an abstention, not a clearance). Otherwise returns
 `"...".encode()`) or one hop through a local variable. Finally, a
 name-independent sweep over every non-docstring literal flags unambiguous
 shapes: vendor key prefixes (AWS `AKIA`, Stripe `sk_live_`, GitHub `ghp_`,
-SendGrid `SG.`, `whsec_`, `npm_`, Mailgun `key-`, Slack `xox?-`), Slack and
+SendGrid `SG.`, `whsec_`, `npm_`, Mailgun `key-`, Slack `xox?-`), PEM private
+key headers (`-----BEGIN ... PRIVATE KEY-----`), Slack and
 Discord webhook URLs, Sentry-style DSN keys, a password in a URL's userinfo
 (`scheme://user:PASS@host`), a secret in a query string (`?token=...`),
 and `password=`/`AccountKey=` pairs inside connection strings or SQL text.
@@ -646,7 +649,10 @@ Private helpers:
   is a template. In a credential slot, `login("u", "password")` still
   counts: it hardcodes the password "password".
 - `_is_secret_name(name)` / `_is_auth_tuple_name(name)` — name tests
-  against `_SECRET_NAME_PATTERN` / `_AUTH_TUPLE_NAMES`.
+  against `_SECRET_NAME_PATTERN` / `_AUTH_TUPLE_NAMES`. `_is_secret_name`
+  first rejects a name whose last word is in `_POINTER_SUFFIXES` (`url`,
+  `file`, `path`, `id`, `name`, ...): `TOKEN_URL`, `SECRET_KEY_FILE` and
+  `private_key_id` point to or describe a secret rather than hold one.
 - `_as_text(value)` — decodes bytes literals.
 - `_target_name(target)` — the name a value is stored under: `x`,
   `self.x`, or `d["x"]`.

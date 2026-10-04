@@ -8,6 +8,11 @@ _SECRET_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Last words of a name that make it a pointer to a secret, or metadata about
+# one, rather than the secret itself.
+_POINTER_SUFFIXES = {"url", "uri", "endpoint", "file", "path", "dir", "name", "id",
+                     "env", "var", "field", "header", "type", "length", "len"}
+
 # Calls named like these take credentials positionally, password last:
 # connect_memcached(host, port, user, pw), sasl_auth(user, pw),
 # PlainCredentials(user, pw). Two or more positional arguments are required,
@@ -53,6 +58,7 @@ _KNOWN_KEY_PATTERNS = [
     re.compile(r"npm_[0-9A-Za-z]{30,}"),             # npm access token
     re.compile(r"key-[0-9a-f]{32}"),                 # Mailgun API key
     re.compile(r"xox[abprs]-[0-9A-Za-z-]{10,}"),     # Slack token
+    re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"),  # PEM private key
     # Secret-bearing URLs: a webhook URL *is* the credential.
     re.compile(r"hooks\.slack\.com/services/[0-9A-Za-z]+/[0-9A-Za-z]+/[0-9A-Za-z]{8,}"),
     re.compile(r"discord(?:app)?\.com/api/webhooks/\d+/[\w-]{8,}"),
@@ -181,8 +187,11 @@ def check_creds(code: str) -> bool | None:
             slot = _PASSWORD_SLOT.get(name)
             if slot is not None and len(node.args) > slot and secret_reaches(node.args[slot]):
                 return True
+            # When the password is passed by keyword, the last positional
+            # argument is something else -- usually the username.
+            password_by_keyword = any(_is_secret_name(k.arg) for k in node.keywords)
             if (name and _CREDENTIAL_CALL_PATTERN.search(name) and len(node.args) >= 2
-                    and secret_reaches(node.args[-1])):
+                    and not password_by_keyword and secret_reaches(node.args[-1])):
                 return True
             # A secret-named key followed by a literal value, in any call:
             # set_config("license_key", "..."), and the hardcoded fallback
@@ -229,7 +238,15 @@ def check_creds(code: str) -> bool | None:
 
 def _is_secret_name(name: object) -> bool:
     # Header-style names ("X-Routing-Key") are normalised to identifiers.
-    return isinstance(name, str) and bool(_SECRET_NAME_PATTERN.search(name.replace("-", "_")))
+    if not isinstance(name, str):
+        return False
+    normalised = name.replace("-", "_").lower()
+    # A name whose last word marks it as a pointer to a secret, or as
+    # metadata about one, holds no secret: TOKEN_URL, SECRET_KEY_FILE,
+    # api_key_path, password_field.
+    if normalised.rsplit("_", 1)[-1] in _POINTER_SUFFIXES:
+        return False
+    return bool(_SECRET_NAME_PATTERN.search(normalised))
 
 
 def _is_auth_tuple_name(name: object) -> bool:
