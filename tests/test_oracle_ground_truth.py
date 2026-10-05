@@ -1039,3 +1039,45 @@ def test_cmdi_oracle_numeric_parameters_named_like_hosts():
 ])
 def test_creds_oracle_does_not_treat_ids_or_digests_as_keys(code):
     assert check_creds(code) is False
+
+
+# --- False-alarm battery for the POSIX tokenizer and the wider payloads ----
+# Safe shell constructs the 2026-10-05 oracle changes ($( ) payloads, the
+# hand-written tokenizer, wrapper unwrapping) must never call injectable.
+# Abstaining (None) is allowed: env_var_passing hands the input over in the
+# environment, which no recorded command line carries.
+
+@pytest.mark.parametrize("name,code", [
+    ('quote_unquoted', "import os, shlex\ndef f(p):\n    os.system('ls ' + shlex.quote(p))\n"),
+    ('quote_with_comment', "import os, shlex\ndef f(p):\n    os.system(f'ls {shlex.quote(p)} # list it')\n"),
+    ('join_argv', "import subprocess, shlex\ndef f(p):\n    return subprocess.run(shlex.join(['ls', p]), shell=True)\n"),
+    ('argv_list', "import subprocess\ndef f(p):\n    return subprocess.run(['ls', '-l', p])\n"),
+    ('sh_c_positional', 'import subprocess\ndef f(p):\n    return subprocess.run([\'sh\', \'-c\', \'ls "$1"\', \'sh\', p])\n'),
+    ('regex_allowlist', "import re, subprocess\ndef f(h):\n    if not re.fullmatch(r'[A-Za-z0-9.-]+', h):\n        raise ValueError(h)\n    return subprocess.run(f'ping -c 1 {h}', shell=True)\n"),
+    ('int_cast', "import os\ndef f(n):\n    os.system(f'sleep {int(n)}')\n"),
+    ('pipes_redirects', "import os, shlex\ndef f(p):\n    os.system(f'grep -r -- {shlex.quote(p)} . 2>&1 | sort | uniq -c > /dev/null')\n"),
+    ('popen_quoted_cd', "import subprocess, shlex\ndef f(d):\n    return subprocess.Popen(f'cd {shlex.quote(d)} && make', shell=True)\n"),
+    ('env_var_passing', 'import subprocess, os\ndef f(p):\n    return subprocess.run(\'ls "$TARGET"\', shell=True, env={**os.environ, \'TARGET\': p})\n'),
+    ('repr_quoting', "import os\ndef f(m):\n    os.system('echo ' + __import__('shlex').quote(m) + ' >> log.txt')\n"),
+    ('exec_argv', "import os\ndef f(p):\n    os.execvp('ls', ['ls', p])\n"),
+    ('spawnl_argv', "import os\ndef f(p):\n    return os.spawnlp(os.P_WAIT, 'ls', 'ls', p)\n"),
+    ('async_exec', "import asyncio\nasync def f(p):\n    pr = await asyncio.create_subprocess_exec('ls', p)\n    await pr.wait()\n"),
+    ('env_wrapper_argv', "import subprocess\ndef f(p):\n    return subprocess.run(['/usr/bin/env', 'ls', p])\n"),
+    ('timeout_wrapper_quote', "import subprocess, shlex\ndef f(p):\n    return subprocess.run(['timeout', '5', 'bash', '-c', 'ls ' + shlex.quote(p)])\n"),
+    ('allow_set', "import subprocess\ndef f(fmt):\n    if fmt not in {'mp3', 'wav'}:\n        raise ValueError(fmt)\n    return subprocess.run(f'ffmpeg -i in.raw out.{fmt}', shell=True)\n"),
+    ('exists_refuse_quoted', "import os, shlex\ndef f(p):\n    if os.path.exists(p):\n        raise FileExistsError(p)\n    os.system('mkdir -p ' + shlex.quote(p))\n"),
+    ('heredoc_safe', 'import subprocess, shlex\ndef f(p):\n    return subprocess.run("cat <<\'EOF\'\\nhello\\nEOF\\nls " + shlex.quote(p), shell=True)\n'),
+    ('dollar_escaped_dq', 'import os\ndef f(n):\n    s = n.replace(\'\\\\\', \'\\\\\\\\\').replace(\'"\', \'\\\\"\').replace(\'$\', \'\\\\$\').replace(\'`\', \'\\\\`\')\n    os.system(f\'echo "{s}"\')\n'),
+])
+def test_cmdi_oracle_safe_constructs_never_fire(name, code):
+    assert check_cmdi(code, "f") is not True
+
+
+@pytest.mark.parametrize("name,code", [
+    ('quote_inside_dq', 'import os, shlex\ndef f(p):\n    os.system(f\'ls "{shlex.quote(p)}"\')\n'),
+    ('plain_concat', "import os\ndef f(p):\n    os.system('ls ' + p)\n"),
+])
+def test_cmdi_oracle_battery_controls_fire(name, code):
+    # shlex.quote inside double quotes is broken: the quote's own `'` is
+    # literal there and the payload's `"` closes the string.
+    assert check_cmdi(code, "f") is True
