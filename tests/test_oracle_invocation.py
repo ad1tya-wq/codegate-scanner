@@ -17,8 +17,37 @@ def test_date_looking_parameters_get_a_date_string():
 
 
 def test_other_parameters_get_a_plain_string():
-    for name in ("username", "keyword", "author", "category", "host", "body"):
+    for name in ("username", "keyword", "author", "category", "body"):
         assert benign_value_for(name) == "alice", name
+
+
+def test_format_validated_parameters_get_a_well_formed_value():
+    # Near-miss code validates these with a regex and rejects "alice", so it
+    # never reached its sink and abstained: 25 email/host/URL samples in the
+    # shipped corpus (docs/ENGINEERING_LOG.md section 14).
+    for name in ("email", "new_email", "recipient_email"):
+        assert benign_value_for(name) == "alice@example.com", name
+    for name in ("url", "repo_url", "endpoint"):
+        assert benign_value_for(name) == "https://example.com/alice", name
+    for name in ("host", "hostname", "domain", "server"):
+        assert benign_value_for(name) == "example.com", name
+
+
+def test_format_hints_match_whole_words_and_yield_to_a_numeric_last_word():
+    # Code review: substring matching gave server_port a host name and
+    # security_level ("uri") a URL.
+    for name in ("server_port", "domain_id", "mailbox_id", "link_count", "host_count"):
+        assert benign_value_for(name) == 1, name
+    for name in ("security_level", "max_hosts", "curiosity"):
+        assert benign_value_for(name) == "alice", name
+
+
+def test_prelude_hints_match_the_module():
+    ns: dict = {}
+    exec(HARNESS_PRELUDE, ns)
+    for name in ("email", "repo_url", "hostname", "user_id", "start_date", "sort_column", "body",
+                 "server_port", "security_level", "max_hosts", "mailbox_id", "link_count"):
+        assert ns["benign_value_for"](name) == benign_value_for(name), name
 
 
 def test_date_hints_win_over_numeric_hints():

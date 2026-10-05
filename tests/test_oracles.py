@@ -212,3 +212,11 @@ def test_run_semgrep_flags_deferred_percent_format_query():
     result = run_semgrep(code)
     assert result["hit"] is True
     assert any("sqli" in f["rule_id"] for f in result["findings"])
+
+
+def test_sandbox_runs_non_ascii_source():
+    # The script was written in the platform encoding (cp1252 on Windows)
+    # and read back as UTF-8, so any non-ASCII generated code failed there.
+    result = run_sandboxed("print('café ✓')", harness="", timeout_s=15.0)
+    assert result.returncode == 0
+    assert "caf" in result.stdout

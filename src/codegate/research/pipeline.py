@@ -10,6 +10,7 @@ from codegate.config import CodeGateConfig
 from codegate.research.corpus.prompts import Prompt
 from codegate.research.generation.backends import Backend
 from codegate.research.generation.harness import run_generation
+from codegate.oracles.ast_utils import parses
 from codegate.oracles.sqli_oracle import check_sqli
 from codegate.oracles.cmdi_oracle import check_cmdi
 from codegate.oracles.creds_oracle import check_creds
@@ -46,7 +47,7 @@ LABEL_ABSTAIN = -1
 # codellama), square-bracket tags ([PYTHON] ... [/PYTHON], codellama), and
 # HTML-style tags (<pre> ... </pre>, codellama). Without extraction,
 # ast.parse() on the raw text raises SyntaxError on the prose,
-# _first_function_name returns None, and the dynamic oracles fall back to
+# no function name can be read, and the dynamic oracles fall back to
 # SimulatedBackend's four template names -- which real models essentially
 # never use -- so every dynamic-oracle CWE (89, 78) abstains almost
 # entirely on exactly the flavors (vulnerable, near_miss) that need
@@ -82,11 +83,37 @@ def extract_code(raw: str) -> str:
     that emits no usable code at all (also observed: a genuine non-answer
     that should legitimately abstain downstream, not be forced into a
     false extraction).
+
+    When the result does not parse, its dedented form, or an extraction
+    from the dedented answer, is used instead if that parses: codellama
+    sometimes indents its whole answer, fences included, by two spaces
+    (18 neutral samples in the shipped corpus).
     """
+    code = _extract_once(raw)
+    if parses(code):
+        return code
+    for candidate in (textwrap.dedent(code), _extract_once(textwrap.dedent(raw))):
+        if parses(candidate):
+            return candidate
+    return code
+
+
+def _extract_once(raw: str) -> str:
+    # Prefer the first def-bearing block that parses. Step-by-step answers
+    # (codellama, real corpus) put the bare signature in its own block
+    # before the full code; taking that fragment handed the oracle a
+    # function with no body, which read as SAFE. If no def-bearing block
+    # parses, the first one is still returned, so the oracle abstains.
+    first_def_block = None
     for pattern in _DELIMITER_PATTERNS:
         for block in pattern.findall(raw):
             if _DEF_RE.search(block):
-                return block
+                if parses(block):
+                    return block
+                if first_def_block is None:
+                    first_def_block = block
+    if first_def_block is not None:
+        return first_def_block
 
     # Two codellama shapes seen in the pilot corpus, tried only when no
     # well-formed delimiter held a def: code wrapped in an HTML <details>
@@ -103,16 +130,38 @@ def extract_code(raw: str) -> str:
     return raw
 
 
-def _first_function_name(code: str) -> str | None:
+def _function_names(code: str) -> list[str]:
+    """Every function the snippet defines, in source order, or [] when it
+    doesn't parse."""
     import ast
     try:
         tree = ast.parse(code)
-    except SyntaxError:
-        return None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
-            return node.name
-    return None
+    except (SyntaxError, ValueError):
+        return []
+    defs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    names: list[str] = []
+    for node in sorted(defs, key=lambda n: (n.lineno, n.col_offset)):
+        if node.name not in names:
+            names.append(node.name)
+    return names
+
+
+def _judge_every_function(check, code: str, names: list[str]) -> bool | None:
+    """
+    The snippet's verdict from a dynamic oracle: True if any function is
+    injectable, False if none is and at least one was judged safe, None if
+    no function could be judged. Judging only the first function let a
+    validation helper defined first (`is_valid_hostname` before
+    `scan_host`) stand in for the function the prompt asked for.
+    """
+    saw_safe = False
+    for fn in names:
+        v = check(code, function_name=fn)
+        if v is True:
+            return True
+        if v is False:
+            saw_safe = True
+    return False if saw_safe else None
 
 
 def label_row(row: pd.Series) -> dict:
@@ -126,26 +175,16 @@ def label_row(row: pd.Series) -> dict:
     code = row["code"]
     cwe = row["cwe"]
 
-    candidate_names = list(_SIM_CANDIDATE_FN_NAMES)
-    first_fn = _first_function_name(code)
-    if first_fn and first_fn not in candidate_names:
-        candidate_names = [first_fn] + candidate_names
+    candidate_names = _function_names(code)
+    candidate_names += [n for n in _SIM_CANDIDATE_FN_NAMES if n not in candidate_names]
 
     dynamic_verdict = None
     static_verdict = None
 
     if cwe == "CWE-89":
-        for fn in candidate_names:
-            v = check_sqli(code, function_name=fn)
-            if v is not None:
-                dynamic_verdict = v
-                break
+        dynamic_verdict = _judge_every_function(check_sqli, code, candidate_names)
     elif cwe == "CWE-78":
-        for fn in candidate_names:
-            v = check_cmdi(code, function_name=fn)
-            if v is not None:
-                dynamic_verdict = v
-                break
+        dynamic_verdict = _judge_every_function(check_cmdi, code, candidate_names)
     elif cwe == "CWE-798":
         static_verdict = check_creds(code)
 

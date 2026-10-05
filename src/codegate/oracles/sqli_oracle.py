@@ -1,10 +1,10 @@
 from __future__ import annotations
 import re
 
-from codegate.oracles.ast_utils import function_exists
+from codegate.oracles.ast_utils import function_exists, parses
 from codegate.oracles.dbapi_recorder import RECORDER_SOURCE
 from codegate.oracles.invocation import HARNESS_PRELUDE, benign_candidates, guarded_exec_source
-from codegate.oracles.sandbox import run_sandboxed
+from codegate.oracles.sandbox import SANDBOX_TIMEOUTS_S, run_sandboxed
 
 # The fixture creates every table name a model plausibly picks for these
 # prompts, all with identical shape. A real model asked to "look up a user"
@@ -189,18 +189,21 @@ def check_sqli(code: str, function_name: str) -> bool | None:
     real-540 corpus. Recording at the call boundary depends on neither.
     See docs/ENGINEERING_LOG.md sections 11 and 12.
     """
+    if not parses(code):
+        return None  # no runnable code, so no evidence either way
+
     if not has_sql_sink(code):
         return False  # no SQL anywhere: confidently safe, not "unknown"
 
     if not function_exists(code, function_name):
         return None
 
-    # 15s rather than the original 5s: the harness makes up to n_params + 1
-    # invocations inside one process instead of a single call. Still one
-    # subprocess per sample, so corpus-scale wall clock is unchanged.
-    result = run_sandboxed(
-        _build_source(code, function_name), harness="", timeout_s=15.0
-    )
+    # A timeout is retried once with a longer budget (see SANDBOX_TIMEOUTS_S).
+    source = _build_source(code, function_name)
+    for timeout_s in SANDBOX_TIMEOUTS_S:
+        result = run_sandboxed(source, harness="", timeout_s=timeout_s)
+        if not result.timed_out:
+            break
 
     if result.timed_out:
         return None

@@ -33,8 +33,9 @@ expensive, and still just a probabilistic guess dressed up as an answer.
 CodeGate does neither. It runs a cheap, deterministic pre-pass over your
 code first, and only calls an LLM for the functions it genuinely cannot
 vouch for. The part it *doesn't* escalate isn't a guess either — it comes
-with a real, provable guarantee: **"of the vulnerable functions it sees,
-at most 10% get auto-approved, and we're 95% confident of that bound."** That
+with a real, provable guarantee: **"averaged over coding tasks, at most 10%
+of vulnerable functions get auto-approved, and we're 95% confident of that
+bound."** That
 guarantee is computed statistically, not asserted, and it holds no
 matter what the underlying model looks like inside.
 
@@ -151,9 +152,11 @@ flowchart LR
 
 **OFFLINE (research half, run rarely):** generates code from several
 LLMs against a fixed prompt bank, labels each sample with *dynamic
-detonation oracles* — the SQLi and cmdi oracles actually **execute** the
-generated code in a sandbox and observe whether the exploit fires, which
-is a stronger signal than any pattern match — trains the ranker, and
+oracles* — the SQLi and cmdi oracles actually **run** the generated code in
+a sandbox with an attack input in each parameter, record the exact SQL
+query or shell command it builds, and check whether the input changed that
+query's or command's meaning, which is a stronger signal than any pattern
+match — trains the ranker, and
 calibrates the LTT threshold. This is the only place in the whole
 project that runs untrusted, LLM-generated code, and it's a deliberate,
 contained choice (see
@@ -208,26 +211,28 @@ PNGs land in `data/eval/` (gitignored — regenerate locally with
 | Metric | Result | What it means |
 |---|---|---|
 | Oracle accuracy on ground-truth fixtures | **6/6** | The three oracles (SQLi, cmdi, creds) agree with their textbook examples |
-| Corpus size / vulnerable rate / abstentions | **2,040 / 26.8% / 6.6%** | Real code from 4 local models (qwen2.5-coder, deepseek-coder, codellama, codegemma), 510 prompts each; abstentions are samples no oracle could judge, excluded rather than counted as safe |
-| Ranker separation (ROC-AUC), held-out test split | **0.889** | How well the score separates vulnerable from safe code the ranker never saw (0.925 including its training data) |
-| Certified threshold | **t̂ = 0.8259 @ α = 0.10, δ = 0.05** (cluster-aware, 66 task groups) | Of vulnerable functions, at most 10% score above this, with 95% confidence; 49% of calibration code clears it. α = 0.05 is also certified (t̂ = 0.9091, 29% coverage) via `--alpha 0.05` |
-| Held-out check of that guarantee | **7.6% per task group, 9.3% per sample** | Share of vulnerable test-split code the threshold auto-approves, against the 10% target (95% cluster bootstrap 0.8–16.7%) |
-| Generator shift (calibrate on 3 models, test on the 4th, unseen data only) | **3 of 4 within α = 0.10** | Realized 2.9%, 3.7%, 7.0%, and 11.0% for codegemma (10 of 91; not significant, P = 0.43) |
-| End-to-end scan vs. real ground truth, static + gate only | **precision 0.27, recall 1.00, F1 0.43** | Catches every real vulnerability in the demo app; the strict threshold escalates 10 of 14 functions, which costs LLM calls, not misses |
+| Corpus size / vulnerable rate / abstentions | **2,040 / 28.2% / 5.5%** | Real code from 4 local models (qwen2.5-coder, deepseek-coder, codellama, codegemma), 510 prompts each; abstentions are samples no oracle could judge, excluded rather than counted as safe |
+| Ranker separation (ROC-AUC), held-out test split | **0.902** | How well the score separates vulnerable from safe code the ranker never saw (0.934 including its training data) |
+| Certified threshold | **t̂ = 0.8043 @ α = 0.10, δ = 0.05** (cluster-aware, 66 task groups) | Averaged over tasks, at most 10% of vulnerable functions score above this, with 95% confidence; 50% of calibration code clears it. α = 0.05 is also certified (t̂ = 0.9046, 29% coverage) via `--alpha 0.05` |
+| Held-out check of that guarantee | **9.3% per task group** (10.7% per sample) | Share of vulnerable test-split code the threshold auto-approves. The certified quantity is the per-task average, within the 10% target (95% cluster bootstrap 1.8–19.2%); per sample it is 12 of 112, which a true 10% rate produces 45% of the time |
+| Generator shift (calibrate on 3 models, test on the 4th, unseen data only) | **3 of 4 within α = 0.10** | Realized 3.5%, 4.2%, 6.4%, and 10.5% for codegemma (10 of 95; not significant, P = 0.48) |
+| End-to-end scan vs. real ground truth, static + gate only | **precision 0.30, recall 1.00, F1 0.46** | Catches every real vulnerability in the demo app; the strict threshold escalates 9 of 14 functions, which costs LLM calls, not misses |
 | End-to-end scan vs. real ground truth, **with LLM verifier** | *not yet re-run on the real model* | Was precision 1.00 / recall 1.00 on the earlier simulated model; needs a Groq key and live API calls to re-measure |
 
-**Why the certificate is cluster-aware.** The 206 vulnerable calibration
+**Why the certificate is cluster-aware.** The 218 vulnerable calibration
 samples come from 66 task groups, because four models answered each task,
 and their scores are correlated within a group (intra-group correlation
-0.57, so ≈ 94 independent samples' worth of evidence). The standard
-per-sample LTT test treats them as 206 independent draws. In simulation
+0.66, so ≈ 86 independent samples' worth of evidence). The standard
+per-sample LTT test treats them as 218 independent draws. In simulation
 under that correlation it certified thresholds that really missed more
-than α in 8.5–12% of runs, against the 5% it promises. On our data its
-α = 0.10 threshold missed 13.1% of held-out vulnerable code. CodeGate
+than α in 7–15% of runs, against the 5% it promises. On our data its
+α = 0.10 threshold missed 13.4% of held-out vulnerable code. CodeGate
 instead counts each task group once (Hoeffding–Bentkus over per-group miss
 fractions), which kept its promise in every simulated setting and stays
-within target on held-out data. The cost is coverage: 49% of code
-auto-approved instead of 56%. Details: `docs/ENGINEERING_LOG.md` §13 and
+within target on held-out data. The cost is coverage: 50% of code
+auto-approved instead of 56%. The quantity it bounds is the miss rate
+averaged over tasks; a per-function bound under the same assumptions was
+tried and has no power at this corpus size. Details: `docs/ENGINEERING_LOG.md` §13 and
 [`docs/cluster-aware-certificate/README.md`](docs/cluster-aware-certificate/README.md).
 
 ## Future improvements
@@ -235,14 +240,16 @@ auto-approved instead of 56%. Details: `docs/ENGINEERING_LOG.md` §13 and
 - **More task groups** — the task, not the sample, is the unit of
   evidence, so more tasks (not more samples per task) is what buys
   coverage. Today α = 0.05 certifies only 29% coverage from 66 vulnerable
-  calibration groups.
+  calibration groups, and the held-out check is close to the line at
+  α = 0.10.
 - **Published cost/token accounting**, backed by real Groq pricing
   (currently a placeholder — see `report/accounting.py`) and real
   per-call token usage from the API's own `usage` field, not just the
   chars/4 estimate.
-- **Better CWE-78 near-miss coverage** — 32% of safe command-execution
-  samples still can't be judged, because they validate input in ways the
-  harness can't satisfy (existing directories, base-directory checks).
+- **Better CWE-78 near-miss coverage** — 26% of safe command-execution
+  samples still can't be judged, mostly code that only runs its command for
+  paths under a hardcoded base directory (`/var/log/...`) the harness
+  cannot supply.
 - **Broaden CWE coverage** beyond the current three, each requiring its
   own reliable ground-truth signal (dynamic detonation where possible,
   same standard as CWE-89/78 today).

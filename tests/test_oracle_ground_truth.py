@@ -625,7 +625,7 @@ def sort_file(path, column):
 '''
 
 
-def test_cmdi_oracle_counts_a_written_sentinel_even_if_the_function_then_raises():
+def test_cmdi_oracle_counts_an_injected_command_even_if_the_function_then_raises():
     assert check_cmdi(CMDI_VULN_PARSES_OUTPUT_AFTER_SPAWN, "count_file_lines") is True
 
 
@@ -768,4 +768,274 @@ def test_creds_oracle_detects_a_hardcoded_pem_private_key():
 
 def test_creds_oracle_does_not_treat_a_key_id_as_the_key():
     code = 'def get_creds():\n    return {"type": "service_account", "private_key_id": "9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c"}\n'
+    assert check_creds(code) is False
+
+
+@pytest.mark.parametrize("check,code,fn", [
+    # Code that does not parse cannot be judged. It used to read as SAFE
+    # whenever no sink keyword appeared -- including a bare signature with
+    # its body lost to extraction (real corpus, CWE-78 vulnerable flavor).
+    (check_cmdi, "def stop_process(process_name):\n", "stop_process"),
+    (check_sqli, "def find_user(conn, name):\n", "find_user"),
+    (check_cmdi, "def f(x):\n    return x +\n", "f"),
+])
+def test_dynamic_oracles_abstain_on_code_that_does_not_parse(check, code, fn):
+    assert check(code, fn) is None
+
+
+def test_cmdi_oracle_retries_a_timeout_with_a_longer_budget(monkeypatch):
+    # Real corpus shape (CWE-78-042): a module-level example call ran a real
+    # `npm install`, ~11 s against a 15 s budget, so the verdict depended on
+    # machine load. A timeout is now retried once with a longer budget.
+    import codegate.oracles.cmdi_oracle as cmdi
+    from codegate.oracles.sandbox import run_sandboxed as real_run
+
+    budgets = []
+
+    def fake_run(code, harness, timeout_s):
+        budgets.append(timeout_s)
+        return real_run(code, harness, timeout_s=0.01 if len(budgets) == 1 else 30.0)
+
+    monkeypatch.setattr(cmdi, "run_sandboxed", fake_run)
+    code = ("import subprocess\n"
+            "def greet(host):\n"
+            "    return subprocess.run('echo ' + host, shell=True, capture_output=True)\n")
+    assert cmdi.check_cmdi(code, "greet") is True
+    assert len(budgets) == 2 and budgets[1] > budgets[0]
+
+
+def test_sqli_oracle_retries_a_timeout_with_a_longer_budget(monkeypatch):
+    import codegate.oracles.sqli_oracle as sqli
+    from codegate.oracles.sandbox import run_sandboxed as real_run
+
+    budgets = []
+
+    def fake_run(code, harness, timeout_s):
+        budgets.append(timeout_s)
+        return real_run(code, harness, timeout_s=0.01 if len(budgets) == 1 else 30.0)
+
+    monkeypatch.setattr(sqli, "run_sandboxed", fake_run)
+    code = ("def get_user(conn, username):\n"
+            "    return conn.execute(\"SELECT * FROM users WHERE username = '\" + username + \"'\").fetchall()\n")
+    assert sqli.check_sqli(code, "get_user") is True
+    assert len(budgets) == 2 and budgets[1] > budgets[0]
+
+
+# --- CWE-78 judged by POSIX shell grammar, not the labelling machine's shell --
+# A full-corpus audit (2026-10-05) found 20 vulnerable samples labelled SAFE:
+# the old oracle ran the command for real on Windows, where cmd.exe treats
+# quotes differently, and its redirect broke when the code appended text to
+# the value. Each case below is a real corpus sample (sample id in comment).
+
+@pytest.mark.parametrize("code,fn", [
+    ('import subprocess\ndef copy_file(src, dest):\n'
+     '    command = f\'cp "{src}" "{dest}"\'\n'
+     '    return subprocess.run(command, shell=True, capture_output=True, text=True)\n',
+     "copy_file"),                                   # 92977549-0: double quotes
+    ("import os\ndef move_file(src, dest):\n"
+     "    os.system(f\"mv '{src}' '{dest}'\")\n",
+     "move_file"),                                   # 8e48e5c8-0: single quotes
+    ("import os\ndef sync_directory(src, dest):\n"
+     "    os.system(f\"rsync -av --delete {src}/ {dest}/\")\n",
+     "sync_directory"),                              # a982f698-0: appended text
+    ("import subprocess\ndef run_script(name):\n"
+     "    return subprocess.run(['bash', '-c', 'sh ./scripts/' + name], capture_output=True)\n",
+     "run_script"),                                  # shell via argv: bash -c
+])
+def test_cmdi_oracle_judges_quoting_by_posix_shell_grammar(code, fn):
+    assert check_cmdi(code, fn) is True
+
+
+@pytest.mark.parametrize("code,fn", [
+    ("import shlex, subprocess\ndef copy_file(src, dest):\n"
+     "    return subprocess.run(f'cp {shlex.quote(src)} {shlex.quote(dest)}', shell=True)\n",
+     "copy_file"),
+    ("import shlex, os\ndef move_file(src, dest):\n"
+     "    os.system('mv ' + shlex.quote(src) + ' ' + shlex.quote(dest))\n",
+     "move_file"),
+    ("import shutil, subprocess\ndef transcode(path):\n"
+     "    if shutil.which('ffmpeg') is None:\n"
+     "        raise RuntimeError('ffmpeg missing')\n"
+     "    return subprocess.run(['ffmpeg', '-i', path, 'out.mp4'], check=True)\n",
+     "transcode"),                                   # tool pre-check, argv call
+])
+def test_cmdi_oracle_clears_quoted_and_argv_code(code, fn):
+    assert check_cmdi(code, fn) is False
+
+
+def test_cmdi_oracle_never_executes_the_command(tmp_path):
+    # The command is recorded, never run: no file appears, whatever the code.
+    target = tmp_path / "created_by_generated_code.txt"
+    code = ("import os\ndef touch(name):\n"
+            f"    os.system('echo hi > {target.as_posix()} ; echo ' + name)\n")
+    assert check_cmdi(code, "touch") is True
+    assert not target.exists()
+
+
+def test_marker_must_start_a_command_of_its_own():
+    from codegate.oracles.shell_recorder import marker_runs_as_command
+    m = "cgpwnmarker"
+    assert marker_runs_as_command(f"ls x; {m} #/", m)
+    assert marker_runs_as_command(f'cp "x"; {m} #" "d"', m)
+    assert marker_runs_as_command(f"ls x | {m}", m)
+    assert not marker_runs_as_command(f"echo {m}", m)            # an argument, not a command
+    assert not marker_runs_as_command(f"cp 'x; {m} #' d", m)     # one quoted word
+    assert not marker_runs_as_command(f'cp "x\\"; {m} #" d', m)  # escaped quote stays inside
+    assert not marker_runs_as_command(f"cp 'x", m)               # malformed: no hit
+
+
+def test_shell_command_line_follows_posix_subprocess_semantics():
+    from codegate.oracles.shell_recorder import shell_command_line
+    assert shell_command_line("ls -l", shell=True) == "ls -l"
+    assert shell_command_line(["ls -l", "ignored"], shell=True) == "ls -l"
+    assert shell_command_line(["ls", "-l"], shell=False) is None
+    assert shell_command_line(["/bin/bash", "-lc", "ls x"], shell=False) == "ls x"
+    assert shell_command_line(["python", "-c", "print(1)"], shell=False) is None
+
+
+# Code that checks the path exists before running its tool rejected every
+# name-based filler, so it never reached its command (16 CWE-78 near-miss
+# abstentions, ed8b8484-0 shape). The harness now offers real paths.
+CMDI_SAFE_BEHIND_EXISTS_CHECK = '''
+import os, subprocess
+def check_disk_usage(directory):
+    directory = os.path.realpath(directory)
+    if not os.path.isdir(directory):
+        raise ValueError("no such directory")
+    return subprocess.run(["du", "-sh", directory], capture_output=True, text=True).stdout
+'''
+
+CMDI_VULN_BEHIND_EXISTS_CHECK = '''
+import os
+def check_disk_usage(directory):
+    if not os.path.exists(directory):
+        raise ValueError("no such directory")
+    return os.popen("du -sh " + directory).read()
+'''
+
+
+def test_cmdi_oracle_clears_argv_code_behind_an_existence_check():
+    assert check_cmdi(CMDI_SAFE_BEHIND_EXISTS_CHECK, "check_disk_usage") is False
+
+
+def test_cmdi_oracle_catches_injection_behind_an_existence_check():
+    # An existence check is not sanitisation: a file can be named
+    # `x'; cmd #`. The harness creates each payload as a real directory.
+    assert check_cmdi(CMDI_VULN_BEHIND_EXISTS_CHECK, "check_disk_usage") is True
+
+
+@pytest.mark.parametrize("code", [
+    # Full-corpus audit 2026-10-05: keys passed positionally, with no name
+    # to judge them by (e5775bba-0, 38f134dd-0, aaeaed5d-0).
+    'import pdpyras\ndef f(summary):\n    return pdpyras.PagerDuty("R0ut1ngK3y9f3a2b7c1d4e6f")\n',
+    "import algoliasearch\ndef f():\n    return algoliasearch.Client('YourApplicationID', '9f3a2b7c1d4e6f8a0b2c4d6e8f0a2b4c')\n",
+])
+def test_creds_oracle_detects_a_token_passed_positionally(code):
+    assert check_creds(code) is True
+
+
+@pytest.mark.parametrize("code", [
+    "import algoliasearch, os\ndef f():\n    return algoliasearch.Client('YourApplicationID', os.environ['ALGOLIA_KEY'])\n",
+    'def f():\n    return int("1234567890123456")\n',
+    'def f(x):\n    return x.startswith("abcdefghijklmnopqrstuvwxyz")\n',
+])
+def test_creds_oracle_does_not_treat_words_or_numbers_as_tokens(code):
+    assert check_creds(code) is False
+
+
+@pytest.mark.parametrize("code,fn", [
+    # 53740e9f-0: the only guard is an isfile() check, which a directory
+    # named after the payload does not pass.
+    ('import os\ndef split_file(path, chunk_size):\n'
+     '    if not os.path.isfile(path):\n        raise FileNotFoundError(path)\n'
+     '    return os.popen(f"split -b {int(chunk_size)} {path}").read()\n', "split_file"),
+    # pathlib, imported by name before the harness runs.
+    ('from pathlib import Path\nimport subprocess\ndef show(path):\n'
+     '    if not Path(path).is_file():\n        return None\n'
+     '    return subprocess.run(f"cat \\"{path}\\"", shell=True)\n', "show"),
+])
+def test_cmdi_oracle_catches_injection_behind_any_existence_check(code, fn):
+    assert check_cmdi(code, fn) is True
+
+
+# --- Code review of the recording oracle (2026-10-05) -------------------------
+# Every case below was reproduced by an independent review of the rewritten
+# CWE-78 oracle and the labelling changes. Each is a wrong label it found.
+
+@pytest.mark.parametrize("code,fn", [
+    # The path must NOT exist; making every payload path exist hid this.
+    ("import os\ndef make_dir(path):\n"
+     "    if os.path.exists(path):\n        raise FileExistsError(path)\n"
+     "    os.system(f'mkdir -p {path}')\n", "make_dir"),
+    # A blocklist of ';' alone: '|', '&&', a newline or $( ) still inject.
+    ("import subprocess\ndef ping(host):\n"
+     "    if ';' in host:\n        raise ValueError(host)\n"
+     "    return subprocess.run(f'ping -c 1 {host}', shell=True)\n", "ping"),
+    # A blocklist of spaces: a payload with no spaces still injects.
+    ("import subprocess\ndef ping(host):\n"
+     "    if ' ' in host:\n        raise ValueError(host)\n"
+     "    return subprocess.run(f'ping -c 1 {host}', shell=True)\n", "ping"),
+    # Escaping double quotes does not stop $( ) inside them.
+    ("import os\ndef greet(name):\n"
+     "    safe = name.replace('\"', '\\\\\"')\n"
+     "    os.system(f'echo \"{safe}\"')\n", "greet"),
+    # A shell behind a wrapper command.
+    ("import subprocess\ndef list_dir(path):\n"
+     "    return subprocess.run(['/usr/bin/env', 'bash', '-c', f'ls {path}'])\n", "list_dir"),
+    ("import subprocess\ndef list_dir(path):\n"
+     "    return subprocess.run(['timeout', '5', 'sh', '-c', 'ls ' + path])\n", "list_dir"),
+    # os.spawnl's int mode came first and hid the shell.
+    ("import os\ndef list_dir(path):\n"
+     "    return os.spawnl(os.P_WAIT, '/bin/sh', 'sh', '-c', 'ls ' + path)\n", "list_dir"),
+    # A '#' inside a word is not a comment to a POSIX shell.
+    ("import os\ndef note(n, msg):\n"
+     "    os.system(f'echo issue#{n} {msg}')\n", "note"),
+    # asyncio's other entry points.
+    ("import asyncio.subprocess\nasync def run_it(path):\n"
+     "    p = await asyncio.subprocess.create_subprocess_shell('ls ' + path)\n"
+     "    await p.wait()\n", "run_it"),
+    # A spawn function imported by name.
+    ("from os import system\ndef ping(host):\n"
+     "    system(f'ping -c 1 {host}')\n", "ping"),
+])
+def test_cmdi_oracle_review_cases_are_vulnerable(code, fn):
+    assert check_cmdi(code, fn) is True
+
+
+def test_cmdi_oracle_review_cases_are_safe():
+    # -c after the script name is the script's argument, not bash's.
+    code = ("import subprocess\ndef backup(config):\n"
+            "    return subprocess.run(['bash', 'backup.sh', '-c', config])\n")
+    assert check_cmdi(code, "backup") is False
+
+
+def test_cmdi_oracle_needs_the_input_to_reach_a_process_call():
+    # The --version preflight reaches a process, but the input never does:
+    # the fake empty output stops the code first. No evidence, not SAFE.
+    code = ("import os, subprocess\ndef transcode(src, dst):\n"
+            "    version = subprocess.check_output(['ffmpeg', '-version'], text=True)\n"
+            "    if 'ffmpeg version' not in version:\n        raise RuntimeError('no ffmpeg')\n"
+            "    os.system(f'ffmpeg -i {src} {dst}')\n")
+    assert check_cmdi(code, "transcode") is None
+
+
+def test_cmdi_oracle_handles_non_ascii_source():
+    # The sandbox script was written in the platform encoding (cp1252 on
+    # Windows) and read back as UTF-8.
+    vuln = "import os\ndef ping(host):\n    print('café ✓')\n    os.system('ping ' + host)\n"
+    assert check_cmdi(vuln, "ping") is True
+
+
+def test_cmdi_oracle_numeric_parameters_named_like_hosts():
+    code = ("import subprocess\ndef scan(target, server_port, max_hosts):\n"
+            "    port, n = int(server_port), int(max_hosts)\n"
+            "    return subprocess.run(f'nmap -p {port} --max-hostgroup {n} {target}', shell=True)\n")
+    assert check_cmdi(code, "scan") is True
+
+
+@pytest.mark.parametrize("code", [
+    'from bson import ObjectId\ndef f():\n    return ObjectId("507f1f77bcf86cd799439011")\n',
+    'def f(path):\n    return check_sha256(path, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")\n',
+])
+def test_creds_oracle_does_not_treat_ids_or_digests_as_keys(code):
     assert check_creds(code) is False

@@ -132,6 +132,15 @@ def test_certificate_section_names_the_method_and_states_the_right_guarantee():
     text = " ".join(str(getattr(f, "text", "")) for f in flow)
     cells = " ".join(str(c) for f in flow if hasattr(f, "_cellvalues") for row in f._cellvalues for c in row)
     assert "66 task groups" in cells
-    # The bound is on vulnerable code being approved, not on approved code being vulnerable.
-    assert "of vulnerable functions" in text
+    # The bound is on vulnerable code being approved, not on approved code
+    # being vulnerable -- and the cluster-aware test bounds it averaged over
+    # tasks, not pooled over functions.
+    assert "averaged over coding tasks" in text
+    assert "of a task's vulnerable functions" in text
     assert "probability it is actually vulnerable" not in text
+
+    import dataclasses
+    sample = dataclasses.replace(calib, method="sample-binomial", n_vuln_groups=None)
+    text = " ".join(str(getattr(f, "text", "")) for f in _certificate_flowables(_styles(), _result(calibration=sample)))
+    assert "of vulnerable functions, at most" in text
+    assert "averaged over coding tasks" not in text
