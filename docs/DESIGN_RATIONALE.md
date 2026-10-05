@@ -340,8 +340,8 @@ certificate can't clear" is either exhaustive LLM review (correct, but
 doesn't scale to CI-pipeline latencies or costs) or static-analysis-only
 (scales fine, but has no mechanism to bound what it's missing). On the
 demo app, the shipped real-data model auto-approves 4 of 14 functions with
-no LLM call at all, under a certificate that at most 10% of vulnerable
-functions get auto-approved. It escalates the other 10 to the verifier,
+no LLM call at all, under a certificate that, averaged over tasks, at
+most 10% of vulnerable functions get auto-approved. It escalates the other 10 to the verifier,
 one cached call each. Static + gate alone already reaches recall 1.00,
 with precision 0.27: every real vulnerability is caught, and most safe
 code on this small target is escalated. The verifier's job is to clear those, and its effect on

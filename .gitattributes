@@ -1,0 +1,9 @@
+# Never convert line endings in binary artifacts. reportlab writes PDFs with
+# no NUL bytes, so git would otherwise treat them as text and a Windows
+# checkout (core.autocrlf) would insert CRs and break their byte offsets.
+*.pdf binary
+*.docx binary
+*.pptx binary
+*.png binary
+*.joblib binary
+*.parquet binary

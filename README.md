@@ -266,3 +266,14 @@ Sahu, and Peter Isaac, guided by Dr. Dega Nagaraju. See
 evidence-cited build history, and
 [`docs/FUNCTION_REFERENCE.md`](docs/FUNCTION_REFERENCE.md) for a
 per-function technical reference of the entire codebase.
+
+Three reports explain the project end to end, in Markdown under
+[`docs/reports/`](docs/reports/) and as Word documents under
+[`docs/word/`](docs/word/):
+
+1. [From zero](docs/reports/1_CODEGATE_FROM_ZERO.md) — the problem, the
+   idea, every term, and how the project got here.
+2. [How it works](docs/reports/2_HOW_CODEGATE_WORKS.md) — every component,
+   in the order data flows through it.
+3. [Defending it](docs/reports/3_DEFENDING_CODEGATE.md) — each claim, its
+   evidence, and answers to the hard questions.

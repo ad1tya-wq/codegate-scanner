@@ -356,8 +356,10 @@ see Part 2 for why the shipped point is 0.10).
   rate. Formally, `R(t) = P(auto-approved | truly vulnerable)`: of all the
   genuinely vulnerable code that *could* be auto-approved at threshold
   `t`, what fraction actually is? CodeGate's certificate targets `R(t_hat)
-  <= 0.10` — at most 1 in 10 vulnerable functions slips through
-  auto-approval undetected (1 in 20 with `--alpha 0.05`).
+  <= 0.10` — averaged over coding tasks, at most 1 in 10 vulnerable
+  functions slips through auto-approval undetected (1 in 20 with
+  `--alpha 0.05`). Averaged over tasks because the cluster-aware test
+  counts each task once.
 - **δ (delta)** is *how confident the certificate itself is allowed to be
   wrong*. The full guarantee is `P(R(t_hat) <= alpha) >= 1 - delta` — with
   δ=0.05, there's at least 95% confidence that the α bound actually holds.

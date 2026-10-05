@@ -1890,3 +1890,75 @@ Ranker scores moved by a median of 0.002; the largest moves (up to 0.16)
 are the relabelled CWE-798-027 samples and their siblings.
 
 **Status:** `SOLID`. 442 tests pass.
+
+## 14 · Label audit and the planned label update (2026-10-05)
+
+**Why.** The retrain in §13.1 changed one label for a reason unrelated to
+its fix: a command-injection sample abstained in one full labelling run and
+was VULN in the next. A label that depends on machine load is a labeller
+defect, so every suspicious label was checked rather than just that one.
+
+**Method.** Three groups of labels were exported with their prompt and
+extracted code and read one by one, by three parallel reviewers. Every
+disagreement they reported was re-checked by hand or by an independent
+script before anything changed.
+
+| Group | Samples | Result |
+|---|---|---|
+| SQLi vulnerable-prompt samples labelled SAFE | 76 | all 76 correct: the models wrote parameterized or validated code |
+| Command-injection and credentials vulnerable-prompt samples labelled SAFE, plus safe-prompt samples labelled VULN | 45 | 23 mislabelled (20 command injection, 3 credentials); the other 22 correct |
+| Every abstention | 135 | mostly safe near-miss code whose input validation rejected the harness's filler values |
+
+Separately, every sample's extracted code was checked for whether it parses:
+4 vulnerable samples had been reduced to a bare signature by extraction, and
+24 unparseable samples carried a SAFE label.
+
+**Main finding.** The command-injection oracle ran each command for real
+and the corpus was labelled on Windows, so quoting was judged by the
+Windows shell rather than by POSIX shell rules. Code that is injectable on
+Linux was labelled SAFE. In total the planned labels add 34 vulnerable
+samples that the shipped corpus labels SAFE or does not judge, and change
+one label the other way: code that passes a list with `shell=True`, which
+is not injectable under POSIX rules.
+
+**The planned update.** The corrected oracles are on branch
+`wip/label-audit-2026-10-05`, with the full write-up in
+`docs/LABEL_AUDIT_HANDOFF.md` on that branch. The command-injection oracle
+there records the command a function builds instead of running it, and
+judges it by POSIX shell grammar, so the label no longer depends on the
+labelling machine. Measured on that branch (run v9):
+
+| | shipped | with the planned labels |
+|---|---|---|
+| abstention | 6.6% | 5.5% |
+| vulnerable calibration samples / task groups | 206 / 66 | 218 / 66 |
+| t̂ at α = 0.10 / coverage | 0.8259 / 48.8% | 0.8043 / 49.9% |
+| held-out miss rate per task (the certified quantity) | 7.6% | 9.3% (95% cluster bootstrap 1.8–19.2%) |
+| held-out miss rate per sample | 9.3% (10/107) | 10.7% (12/112; P = 0.45 under a true 10%) |
+| held-out ROC-AUC | 0.889 | 0.902 |
+
+All 23 audited mislabels are fixed there, and no safe-prompt sample in any
+of four corpora became VULN. The validity simulation of §13, rerun with the
+corrected calibration group sizes, still shows the cluster-aware test never
+breaking its promise (0 of 400 runs at every within-group correlation),
+while the per-sample test breaks it in 7–15% of runs.
+
+It is not merged yet because an independent code review of the new oracle
+raised further items, recorded as tests on that branch. It ships once that
+review is closed.
+
+**Certificate alternatives evaluated and not adopted** (on the shipped
+scores):
+
+- A betting-style p-value (Waudby-Smith & Ramdas) certifies a looser
+  threshold at α = 0.10 (53.6% coverage), but its threshold auto-approves
+  13.1% of held-out vulnerable code, and it certifies nothing at α = 0.05.
+  Hoeffding–Bentkus stays.
+- A certificate on the per-function (pooled) miss rate under the same
+  task-level assumption needs an a-priori bound on vulnerable samples per
+  task (12 here), and with it certifies nothing at any α. The certified
+  quantity therefore stays the miss rate averaged over tasks, and the PDF,
+  README and every guide now say so explicitly ("averaged over coding
+  tasks").
+
+**Shipped today:** the guarantee wording above (PDF report and docs).
