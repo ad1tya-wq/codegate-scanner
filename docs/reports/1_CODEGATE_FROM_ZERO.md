@@ -148,7 +148,7 @@ never saw). 24 / 24 / 12 tasks per vulnerability type.
 | Sep | Diagnosis: not too little data — the *labeller* was broken (called functions with the wrong number of arguments, misjudged non-SELECT queries, rejected realistic passwords) | Fix ground truth before scaling |
 | Sep–Oct | Oracles repaired test-first; a 2,160-sample corpus generated on a teammate's machine | First real certificate, Oct 4 |
 | Oct 4 | The certificate's own math assumed samples are independent; four models answering one task are not. Held-out data showed it promising 10% and delivering 13% | Made the certificate **cluster-aware**: each task counts once |
-| Oct 5 | A label-by-label audit of every suspicious label: SQL labels all correct; 34 vulnerable samples labelled SAFE or not judged, mostly command-injection code judged by the labelling machine's Windows shell | A corrected labeller is built and measured, and ships as the next update (report 2, section 6) |
+| Oct 5 | A label-by-label audit of every suspicious label: SQL labels all correct; 34 vulnerable samples labelled SAFE or not judged, mostly command-injection code judged by the labelling machine's Windows shell | The labeller judges commands by POSIX shell rules and runs nothing; the model is retrained on the corrected labels and ships (report 2, section 6) |
 
 The pattern across the whole project: every serious problem was a
 **labelling** problem, and every one was found by checking the data, not
@@ -180,13 +180,13 @@ the team's own prompts produced.
 
 | Measure | Result |
 |---|---|
-| Corpus | 2,040 samples from 4 models; 26.8% of judged samples vulnerable; 6.6% abstained |
-| Certified threshold | t̂ = 0.8259 at α = 0.10, δ = 0.05, cluster-aware over 66 task groups |
-| Coverage (calibration code auto-approved, no LLM call) | 48.8% |
-| Stricter option | α = 0.05 also certified: t̂ = 0.9091, 29.2% coverage (`--alpha 0.05`) |
-| Held-out check: vulnerable test code auto-approved | 7.6% per task (the certified quantity; 95% interval 0.8–16.7%), 9.3% per sample — against 10% |
-| Scorer quality on unseen code (ROC-AUC) | 0.889 |
-| Change of author (calibrate on 3 models, test the 4th) | 3 of 4 within 10% (2.9%, 3.7%, 7.0%); codegemma 11.0%, within noise |
+| Corpus | 2,040 samples from 4 models; 28.3% of judged samples vulnerable; 5.6% abstained; labels audited by hand |
+| Certified threshold | t̂ = 0.8023 at α = 0.10, δ = 0.05, cluster-aware over 66 task groups |
+| Coverage (calibration code auto-approved, no LLM call) | 50.0% |
+| Stricter option | α = 0.05 also certified: t̂ = 0.8916, 31.5% coverage (`--alpha 0.05`) |
+| Held-out check: vulnerable test code auto-approved | 9.3% per task (the certified quantity; 95% interval 1.8–19.2%) against 10%; 10.7% pooled per sample |
+| Scorer quality on unseen code (ROC-AUC) | 0.903 |
+| Change of author (calibrate on 3 models, test the 4th) | 3 of 4 within 10% (4.2%, 3.5%, 6.4%); codegemma 10.5%, within noise |
 | Demo app, without the LLM | 14 functions: 4 auto-approved, 10 escalated; every real vulnerability caught (recall 1.00, precision 0.27) |
 | Automated tests | 442, all passing |
 
@@ -194,7 +194,7 @@ How to read it: on the calibration data, about half of all code clears
 the threshold and needs no LLM call, while the guarantee caps what slips
 through among the vulnerable code at 10%, averaged over tasks. On the test
 split, which the certificate never saw, the share that actually slips
-through is 7.6% averaged over tasks.
+through is 9.3% averaged over tasks.
 
 ## 7 · What it does not claim
 
@@ -207,9 +207,10 @@ through is 7.6% averaged over tasks.
   regression). That costs coverage — how much code is auto-approved — not
   correctness of the guarantee.
 - **Labels are automatic.** They were audited by reading every
-  suspicious one (report 2, section 6), and the corrected labels are the
-  next planned update. With them, the certificate still holds on unseen
-  data (9.3% per task against 10%) and the scorer improves (ROC-AUC 0.902).
+  suspicious one (report 2, section 6), and the shipped model is trained
+  on the corrected labels. An automatic labeller can still be wrong in
+  ways nobody has looked for yet; every change to it is checked against
+  every safe-prompt sample of four corpora.
 
 ---
 
