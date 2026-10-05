@@ -16,6 +16,38 @@ _SHELL_SINK_MARKERS = (
 
 _FUTURE_IMPORT = re.compile(r"^from __future__ import .*$", re.MULTILINE)
 
+# Modules whose functions start processes, for `from os import system`,
+# `import os as o` and similar spellings the keyword scan cannot see.
+_PROCESS_MODULES = {"os", "subprocess", "asyncio", "asyncio.subprocess", "pty", "commands", "posix", "nt"}
+_PROCESS_FUNCTIONS = re.compile(
+    r"^(system|popen|exec[lv]p?e?|spawn[lv]p?e?|posix_spawnp?|Popen|run|call|check_call|"
+    r"check_output|getoutput|getstatusoutput|create_subprocess_(shell|exec)|spawn|"
+    r"subprocess_(shell|exec))$")
+
+
+def _imports_process_function(code: str) -> bool:
+    import ast
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError):
+        return False
+    aliases = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in _PROCESS_MODULES:
+            if any(a.name == "*" or _PROCESS_FUNCTIONS.match(a.name) for a in node.names):
+                return True
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in _PROCESS_MODULES and a.asname:
+                    aliases.add(a.asname)
+        elif (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+              and node.value.id in aliases and _PROCESS_FUNCTIONS.match(node.attr)):
+            return True
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "__import__"):
+            return True
+    return False
+
 
 def has_shell_sink(code: str) -> bool:
     """
@@ -23,22 +55,40 @@ def has_shell_sink(code: str) -> bool:
 
     Same rationale as sqli_oracle.has_sql_sink -- a function that never
     spawns a process cannot contain command injection, so it is confidently
-    safe rather than unjudgeable. Over-inclusive on purpose.
+    safe rather than unjudgeable. Over-inclusive on purpose: a miss here is
+    a confident SAFE label on code the oracle never ran, so process
+    functions imported by name (`from os import system`) or through a
+    module alias (`import os as o; o.system`) count too.
     """
     lowered = code.lower()
-    return any(marker in lowered for marker in _SHELL_SINK_MARKERS)
+    if any(marker in lowered for marker in _SHELL_SINK_MARKERS):
+        return True
+    return _imports_process_function(code)
 
 
 def build_payloads(marker: str, prefixes: list[str], suffixes: list[str]) -> list[str]:
     """
     Breakout payloads, one per quoting context the value might land in:
-    unquoted, inside "...", inside '...'. Each ends in `#`, so whatever the
+    unquoted, inside "...", inside '...'; then command substitution and
+    payloads that avoid spaces or `;`, since a blocklist of either is not
+    sanitisation. The breakouts end in `#`, so whatever the
     code appends after the value (`{src}/`, `{path}.bak`) becomes a shell
     comment instead of breaking the injected command. Affixed variants
     carry a suffix the code checks with `.endswith()` (after the `#`, so it
     is commented out too) or a prefix it checks with `.startswith()`.
     """
-    bases = [f"127.0.0.1; {marker} #", f'x"; {marker} #', f"x'; {marker} #"]
+    bases = [
+        # Breakouts with `;`, one per quoting context.
+        f"127.0.0.1; {marker} #", f'x"; {marker} #', f"x'; {marker} #",
+        # Command substitution: runs unquoted and inside "...", needs no
+        # separator, no space, and survives code that escapes `"` only.
+        f"$({marker})", f"`{marker}`",
+        # No spaces at all, for code that rejects whitespace.
+        f"127.0.0.1;{marker};#",
+        # Other separators, for code that blocklists `;`.
+        f"127.0.0.1 | {marker} #", f"127.0.0.1 && {marker} #", f"127.0.0.1\n{marker}\n#",
+        f"127.0.0.1|{marker}|#",
+    ]
     payloads = []
     for base in bases:
         payloads.append(base)
@@ -55,8 +105,10 @@ _marker = {marker!r}
 _allowlist = {allowlist!r}
 
 
-def _invoke(args):
-    """Call the function once; return (reached a process call, injected)."""
+def _invoke(args, evidence):
+    """Call the function once; return (the input reached a process call,
+    injected). `evidence` are the values that must show up in a recorded
+    call for it to count as the input reaching a process."""
     import asyncio
     import inspect
     _REC.reset()
@@ -70,7 +122,38 @@ def _invoke(args):
         # SystemExit included: generated code calls sys.exit() on bad input.
         # The command, if any, is already recorded.
         pass
-    return _REC.observed, _REC.injected(_marker)
+    return _REC.reached(evidence), _REC.injected(_marker)
+
+
+def _call_texts():
+    return [_REC._call_text(line, a) for line, a in _REC.calls]
+
+
+def _input_reached(vec):
+    """
+    Whether some argument of `vec` reached a process call because it was
+    the input. A benign value can also be a word the code itself uses
+    (`ffmpeg` harvested from `['ffmpeg', '-version']`), so a match alone is
+    not proof: the argument is changed and the call re-recorded. A call
+    that carried the input changes or disappears; a preflight that never
+    saw it is recorded again unchanged.
+    """
+    if not _invoke(vec, vec)[0]:
+        return False
+    before = _call_texts()
+    for _j, _v in enumerate(vec):
+        if isinstance(_v, bool) or not isinstance(_v, (str, int)):
+            continue
+        if not _REC.reached([_v]):
+            continue
+        _carrying = [t for t in before if str(_v) in t]
+        _probe = list(vec)
+        _probe[_j] = (_v + 7919) if isinstance(_v, int) else (_v + "cgprobe")
+        _invoke(_probe, [])
+        _after = set(_call_texts())
+        if any(t not in _after for t in _carrying):
+            return True
+    return False
 
 
 # Existing paths for code that checks os.path.exists/isdir/isfile before
@@ -98,26 +181,36 @@ if _params:
     # ValueError is the canonical safe shape), so without a control run the
     # oracle never observes it reaching a process and abstains -- which
     # discarded 33 of 58 CWE-78 near-miss samples in the real-540 corpus.
+    # It counts only when a benign argument shows up in a recorded call.
     _benign = None
     for _vec in benign_vectors(_params, _allowlist):
-        if _invoke(_vec)[0]:
+        if _input_reached(_vec):
             _observed = True
             _benign = _vec
             break
     if _benign is None:
         _benign = [benign_value_for(p.name) for p in _params]
 
-    for _payload in _payloads:
-        for _i in range(len(_params)):
-            _args = list(_benign)
-            _args[_i] = _payload
-            _reached, _hit = _invoke(_args)
-            _observed = _observed or _reached
-            if _hit:
-                _fired = True
+    # Each payload is tried with payload paths reported missing (the real
+    # filesystem), then reported existing: code guarded by `if not
+    # exists(p)` and code guarded by `if exists(p): raise` both reach
+    # their command in one of the two.
+    for _exist in (False, True):
+        _CG_PAYLOAD_PATHS_EXIST[0] = _exist
+        for _payload in _payloads:
+            for _i in range(len(_params)):
+                _args = list(_benign)
+                _args[_i] = _payload
+                _reached, _hit = _invoke(_args, [_marker])
+                _observed = _observed or _reached
+                if _hit:
+                    _fired = True
+                    break
+            if _fired:
                 break
         if _fired:
             break
+    _CG_PAYLOAD_PATHS_EXIST[0] = False
 
 if _fired:
     print("CODEGATE_VERDICT=VULNERABLE")
@@ -129,14 +222,21 @@ else:
 
 
 # An existence check is not sanitisation: anyone able to create a file can
-# name it `x'; cmd #`. Inside the sandbox, every path containing this run's
-# marker exists -- as a file and as a directory -- so injection behind
+# name it `x'; cmd #`. Inside the sandbox, while _CG_PAYLOAD_PATHS_EXIST[0]
+# is set, every path containing this run's marker exists -- as a file and
+# as a directory -- so injection behind
 # os.path.isfile()/exists()/isdir() or pathlib's is_file()/exists()/is_dir()
 # is caught on every platform (a `"` cannot appear in a Windows filename,
 # so creating the payloads for real would miss that context). Installed
 # before the generated code runs, so `from os.path import isfile` binds it
-# too. The marker is random per call, so no other path can match.
+# too. The marker is random per call, so no other path can match. The
+# harness also runs every payload with the switch off: code that refuses
+# an existing path (`if exists(p): raise FileExistsError`) is just as
+# injectable, and an always-on override hid it.
 _PATHS_EXIST_FOR_PAYLOADS = '''
+_CG_PAYLOAD_PATHS_EXIST = [False]
+
+
 def _cg_paths_exist_for_payloads(marker):
     import os
     import pathlib
@@ -144,7 +244,7 @@ def _cg_paths_exist_for_payloads(marker):
     def _wrap(orig):
         def check(p, *a, **k):
             try:
-                if marker in os.fspath(p):
+                if _CG_PAYLOAD_PATHS_EXIST[0] and marker in os.fspath(p):
                     return True
             except TypeError:
                 pass
@@ -156,7 +256,8 @@ def _cg_paths_exist_for_payloads(marker):
     for name in ("exists", "is_file", "is_dir"):
         orig = getattr(pathlib.Path, name)
         setattr(pathlib.Path, name,
-                (lambda o: lambda self, *a, **k: True if marker in str(self) else o(self, *a, **k))(orig))
+                (lambda o: lambda self, *a, **k: True if (_CG_PAYLOAD_PATHS_EXIST[0] and marker in str(self))
+                 else o(self, *a, **k))(orig))
 
 
 _cg_paths_exist_for_payloads({marker!r})
@@ -196,8 +297,9 @@ def check_cmdi(code: str, function_name: str) -> bool | None:
     (see shell_recorder). False when the function was observed reaching a
     process call and no payload broke out: argv lists with shell=False,
     `shlex.quote`, allowlist validation. None when the code doesn't parse,
-    the function is absent or takes no parameters, or it never reached a
-    process call on any input -- no evidence either way.
+    the function is absent or takes no parameters, or its input never
+    reached a process call -- no evidence either way. A process call that
+    does not carry the input (a `--version` preflight) is not evidence.
 
     Nothing is executed. The previous design ran the command for real and
     looked for a sentinel file, which tied the verdict to the labelling

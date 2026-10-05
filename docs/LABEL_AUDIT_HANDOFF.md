@@ -20,14 +20,33 @@ dedenting extraction; every-function judging; format-aware filler values
 (whole-word, numeric last word wins); positional-token credential rule
 (hex-only tokens only in client/auth calls); UTF-8 sandbox I/O.
 
-**Still open (failing tests in `tests/test_oracle_ground_truth.py`,
-`tests/test_oracle_robustness.py`, `tests/test_pipeline_extract_code.py`):**
-the extraction rule for an unrelated usage block; judging only top-level
-entry-point functions (not helpers or methods); several command-injection
-oracle coverage gaps from the review. Before merging: fix or mark each as a
-documented expected failure, rerun the full suite, relabel the four
-corpora and compare (`scratchpad`-style comparison in 14.4), retrain to a
-scratch directory, and re-check the certificate on the held-out split.
+**Review findings fixed (2026-10-05, second pass); every test on this
+branch now passes except the semgrep-binary tests on a machine without
+semgrep:**
+
+| # | Where | Fix |
+|---|---|---|
+| 1 | `pipeline._extract_once` | a later parsing block replaces an unparseable first block only if it defines every function the first one does; an unrelated usage block never wins |
+| 2 | `pipeline._function_names` | only entry points are judged: functions no other (input-taking) function calls or references; helpers run inside their callers |
+| 3 | `pipeline._function_names`, `ast_utils.function_exists` | module-level functions only (sync and async); methods are never resolved as globals |
+| 4 | `cmdi_oracle.has_shell_sink` | also true for process functions imported by name or via a module alias |
+| 5 | `cmdi_oracle` harness | payload paths are reported missing, then existing (`_CG_PAYLOAD_PATHS_EXIST`), so `if exists(p): raise` code is judged too |
+| 6 | `cmdi_oracle.build_payloads` | adds `$( )`, backticks, no-space, `|`, `&&` and newline payloads |
+| 7 | `ShellRecorder.reached`, harness `_input_reached` | SAFE needs a recorded call that carries the input; the control run confirms it differentially (a preflight such as `ffmpeg -version` is recorded unchanged when the argument changes) |
+| 8 | `shell_recorder.shell_command_line` | unwraps `env`, `timeout`, `nice`, `sudo`, ...; only shell options before the first operand count (`bash script.sh -c x` is not `-c`) |
+| 9 | `ShellRecorder.install` | patches `asyncio.subprocess.*` and `BaseEventLoop.subprocess_shell/exec` |
+| 10 | `shell_recorder.marker_runs_as_command` | own POSIX tokenizer: `#` is a comment only at a word start; command starts inside `$( )`, backticks and `<( )` count |
+| 11 | `ShellRecorder.install` | per-function argv adapters for `os.exec*`, `os.spawn*`, `os.posix_spawn*`; the program path replaces argv[0] |
+
+**Relabel against v9 (all four corpora, every changed label read by hand):**
+real_sym and real_2160 change 6 labels each, real_540 and pilot none. No
+safe-prompt sample became VULN. CWE-89 `9f0de045-0` ABSTAIN to VULN
+(f-string inside `sqlalchemy.text`). CWE-78 `53585bcb-0` ABSTAIN to SAFE
+(argv list). Four CWE-78 near-miss `list_processes` samples SAFE to
+ABSTAIN: they run `ps aux` and filter in Python, so the input never reaches
+a process -- item 7 working as specified, at the cost of four safe
+samples. Remaining before merging: retrain to a scratch directory and
+re-check the certificate on the held-out split.
 
 ---
 
