@@ -181,8 +181,9 @@ attempt certified nothing. See Part 3.
 
 ## Current status
 
-Every phase is built and tested: 442 automated tests, all passing
-locally. CI runs on `main`, so it runs once this branch is merged. The
+Every phase is built and tested: 515 automated tests, all passing
+locally. CI runs the suite on Python 3.11 and 3.13 for every pull request
+and push to `main`. The
 shipped model is now **trained and certified on real LLM-generated code**:
 
 | | |

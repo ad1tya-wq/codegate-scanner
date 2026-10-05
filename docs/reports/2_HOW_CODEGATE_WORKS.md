@@ -290,7 +290,7 @@ verifier).
 
 ## 10 · Engineering practice
 
-- 442 automated tests; every oracle fix began as a failing test built from
+- 515 automated tests; every oracle fix began as a failing test built from
   a real sample, and most detection tests have a deliberately safe twin.
 - Tests assert structure, never model values, so a retrain cannot turn the
   suite red.

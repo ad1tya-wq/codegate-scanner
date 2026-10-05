@@ -36,7 +36,7 @@ are auto-approved, with 95% confidence.
   oracle sees the exact query text, the command oracle sees the exact
   command line (nothing is executed) and reads it with POSIX shell grammar.
 - "Could not tell" is its own label and is never counted as safe.
-- 442 tests, most detection tests paired with a safe twin.
+- 515 tests, most detection tests paired with a safe twin.
 - Every suspicious label was read by hand on 2026-10-05. The SQL labels
   were all right; the command-injection labeller was judging by the
   labelling machine's own (Windows) shell and was rebuilt. The shipped
@@ -152,7 +152,7 @@ That is the project's method working: the first real run certified nothing,
 and the cause turned out to be the labeller, not too little data.
 
 **Q13. How do you know the oracles are right?**
-Fixtures with textbook examples (6 of 6 correct), 442 tests with safe twins,
+Fixtures with textbook examples (6 of 6 correct), 515 tests with safe twins,
 false-alarm checks on every safe-prompt sample across several corpora after
 every change, a battery of twenty safe shell idioms the command oracle must
 never flag, and a full manual audit of suspicious labels (Claim 2).

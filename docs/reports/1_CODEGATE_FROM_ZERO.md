@@ -188,7 +188,7 @@ the team's own prompts produced.
 | Scorer quality on unseen code (ROC-AUC) | 0.903 |
 | Change of author (calibrate on 3 models, test the 4th) | 3 of 4 within 10% (4.2%, 3.5%, 6.4%); codegemma 10.5%, within noise |
 | Demo app, without the LLM | 14 functions: 4 auto-approved, 10 escalated; every real vulnerability caught (recall 1.00, precision 0.27) |
-| Automated tests | 442, all passing |
+| Automated tests | 515, all passing |
 
 How to read it: on the calibration data, about half of all code clears
 the threshold and needs no LLM call, while the guarantee caps what slips

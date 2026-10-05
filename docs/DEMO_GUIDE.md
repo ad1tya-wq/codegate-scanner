@@ -140,7 +140,7 @@ isn't finished yet.
 
 | Question | Answer |
 |---|---|
-| How many tests? | 442, all passing (CI runs on Python 3.11 and 3.13) |
+| How many tests? | 515, all passing (CI runs on Python 3.11 and 3.13) |
 | How many CWEs? | 3 — SQL injection, OS command injection, hardcoded credentials |
 | Certified guarantee? | Averaged over tasks, at most 10% of vulnerable functions auto-approved, 95% confidence (α = 0.10, δ = 0.05), counting each task once; 5% also certified via `--alpha 0.05` |
 | Does it hold on unseen data? | Yes: 9.3% per task of held-out vulnerable code auto-approved, against the 10% bound (10.7% pooled per sample, which is not the certified quantity) |

@@ -1075,8 +1075,8 @@ the prompt asked for.
 #### `research.pipeline.label_row(row: pd.Series) -> dict`
 **Does:** Runs the appropriate oracle(s) for one generated snippet and
 applies the consensus rule, returning one `labeled`-schema row. Builds a
-candidate function-name list (every function the snippet defines, in
-source order, then any of the four simulated-template names not already
+candidate function-name list (the snippet's entry points from
+`_function_names`, in source order, then any of the four simulated-template names not already
 present) and judges all of them with the dynamic oracle for CWE-89/CWE-78
 via `_judge_every_function`; for CWE-798 runs the static `check_creds`
 oracle directly. Output columns: `sample_id`, `cwe`,

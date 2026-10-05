@@ -1,18 +1,18 @@
-# Label audit hand-off (2026-10-05) — work in progress, not shipped
+# Label audit hand-off (2026-10-05) — shipped
 
-**Status.** This branch holds the label audit of 2026-10-05 and the oracle
-changes it led to. It is **not merged**: the shipped model on `main` was
-trained on the labels from before this audit. An independent code review
-of these changes found issues that are not all fixed yet, so the test
-suite on this branch has failing tests by design: each one reproduces a
-review finding and states what the fix must do.
+**Status.** Shipped. The review findings below are fixed, the four corpora
+were relabelled and every changed label read, and the model trained on
+these labels (run v10) is promoted to `data/model/`. Full record:
+`docs/ENGINEERING_LOG.md` §15; progress reports:
+`docs/superpowers/plans/2026-10-05-label-audit-completion.md`.
 
-**Measured result of this branch's labels (run v9, `data/runs/real_sym_v9`,
-git-ignored; reproduce with the commands in 14.4):** 2,040 samples, 5.5%
-abstention, 218 vulnerable calibration samples in 66 task groups, t̂ =
-0.8043 at α = 0.10 with 49.9% coverage, held-out miss rate 9.3% per task
-(95% cluster bootstrap 1.8–19.2%) and 10.7% per sample (12/112), held-out
-ROC-AUC 0.902. No safe-prompt sample in any of four corpora became VULN.
+**Shipped model (run v10, `data/runs/real_sym_v10`, git-ignored; commands
+in 14.4):** 2,040 samples, 5.6% abstention, 218 vulnerable calibration
+samples in 66 task groups, t̂ = 0.8023 at α = 0.10 with 50.0% coverage,
+held-out miss rate 9.3% per task (95% cluster bootstrap 1.8–19.2%) and
+10.7% per sample (12/112), held-out ROC-AUC 0.903. No safe-prompt sample in
+any of four corpora became VULN. (Run v9, before the review fixes, gave
+t̂ = 0.8043 and the same held-out miss rates.)
 
 **Done on this branch, each with tests:** the recording command-injection
 oracle; abstain on unparseable code; timeout retry; parse-preferring and
@@ -20,9 +20,8 @@ dedenting extraction; every-function judging; format-aware filler values
 (whole-word, numeric last word wins); positional-token credential rule
 (hex-only tokens only in client/auth calls); UTF-8 sandbox I/O.
 
-**Review findings fixed (2026-10-05, second pass); every test on this
-branch now passes except the semgrep-binary tests on a machine without
-semgrep:**
+**Review findings fixed (2026-10-05, second pass); the full suite (515
+tests) passes with semgrep installed:**
 
 | # | Where | Fix |
 |---|---|---|
@@ -45,8 +44,7 @@ safe-prompt sample became VULN. CWE-89 `9f0de045-0` ABSTAIN to VULN
 (argv list). Four CWE-78 near-miss `list_processes` samples SAFE to
 ABSTAIN: they run `ps aux` and filter in Python, so the input never reaches
 a process -- item 7 working as specified, at the cost of four safe
-samples. Remaining before merging: retrain to a scratch directory and
-re-check the certificate on the held-out split.
+samples. Retrained and re-checked on the held-out split: see 14.4.
 
 ---
 
@@ -197,9 +195,24 @@ generation run.
 ### 14.4 · Results
 
 ```
-python scripts/train_from_pregenerated.py data/runs/real_sym/generations.parquet --out-dir data/runs/real_sym_v7 --corpus-version real-2040-sym
-python scripts/relabel.py --generations data/runs/<corpus>/generations.parquet --out-dir data/runs/<corpus>_labeled_v7
-python scripts/run_eval.py --model-dir data/runs/real_sym_v7
+python scripts/relabel.py --generations data/runs/<corpus>/generations.parquet --out-dir data/runs/<corpus>_labeled_v10
+python scripts/train_from_pregenerated.py data/runs/real_sym/generations.parquet --out-dir data/runs/real_sym_v10 --corpus-version real-2040-sym
+python scripts/run_eval.py --model-dir data/runs/real_sym_v10
 ```
 
-⟦RESULTS⟧
+| | before the audit (shipped until now) | v10 (shipped) |
+|---|---|---|
+| abstention | 6.6% | 5.6% |
+| vulnerable calibration samples / task groups | 206 / 66 | 218 / 66 |
+| t̂ / coverage at α = 0.10 | 0.8259 / 48.8% | 0.8023 / 50.0% |
+| t̂ / coverage at α = 0.05 | 0.9091 / 29.2% | 0.8916 / 31.5% |
+| held-out ROC-AUC | 0.889 | 0.903 |
+| held-out miss rate per task | 7.6% (0.8–16.7%) | 9.3% (1.8–19.2%) |
+| held-out miss rate per sample | 9.3% (10/107) | 10.7% (12/112) |
+| generator shift, codegemma | 11.0% (10/91) | 10.5% (10/95) |
+
+108 of 2,040 labels change against the labels the previous model was
+trained on, each explained by cause in `docs/ENGINEERING_LOG.md` §15. On the
+same corrected test labels the previous model also misses 7.6% per task, so
+the higher held-out figure comes from v10's lower certified threshold, not
+from the labels.

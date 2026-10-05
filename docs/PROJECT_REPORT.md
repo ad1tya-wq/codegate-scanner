@@ -232,7 +232,7 @@ Repository layout:
 | `scripts/` | Corpus generation, relabelling, training from a shipped corpus, evaluation, corpus repair |
 | `data/prompts/` | The prompt bank (YAML) |
 | `data/model/` | The shipped model and certificate |
-| `tests/` | 442 automated tests |
+| `tests/` | 515 automated tests |
 | `examples/vulnerable_app/` | Demo target with known ground truth |
 
 ---
@@ -596,8 +596,8 @@ codegate calibrate [--real] [--out-dir DIR]     # rebuild model + certificate (d
 
 - **Test-driven fixes.** Every defect fix in the oracle work started as a
   failing test reproducing the real sample. The test was then made to pass,
-  and the full suite rerun. The suite has **442 tests**. The largest file,
-  `tests/test_oracle_ground_truth.py` (158 tests), pins hand-verified labels
+  and the full suite rerun. The suite has **515 tests**. The largest file,
+  `tests/test_oracle_ground_truth.py` (220 tests), pins hand-verified labels
   for every defect found on real data. Most detection tests have a
   deliberately safe twin, so a loosened detector shows up as a failure.
 - **Guardrail: tests assert structure, never model values.** Retraining
@@ -854,7 +854,7 @@ bank is, not something the statistics can check.
 
 ```
 pip install -e ".[dev,research]"
-python -m pytest tests/ -q                                  # 442 tests
+python -m pytest tests/ -q                                  # 515 tests
 
 # label a corpus with the current oracles
 python scripts/relabel.py --generations <generations.parquet> --out-dir <dir>
