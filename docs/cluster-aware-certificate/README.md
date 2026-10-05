@@ -2,7 +2,7 @@
 
 **Status:** implemented and shipped on this branch (2026-10-04).
 Full record with every number and command: `docs/ENGINEERING_LOG.md` §13
-(the figures below are from the retrain in §13.1).
+(the figures below are from the model trained on the audited labels, §15).
 
 ## The problem
 
@@ -15,10 +15,10 @@ correlated:
 
 | | |
 |---|---|
-| Vulnerable calibration samples | 206, in **66 task groups** (≈ 3.1 per group) |
-| Within-group correlation of scores (ICC) | **0.57** → design effect 2.2, ≈ 94 independent samples' worth of evidence |
-| Per-sample certificate at α = 0.10 | `t̂ = 0.7763`, 56.4% coverage |
-| …its held-out miss rate | **13.1%** against the 10% it promised |
+| Vulnerable calibration samples | 218, in **66 task groups** (≈ 3.3 per group) |
+| Within-group correlation of scores (ICC) | **0.66** → design effect 2.5, ≈ 87 independent samples' worth of evidence |
+| Per-sample certificate at α = 0.10 | `t̂ = 0.7548`, 58.5% coverage |
+| …its held-out miss rate | **13.4%** against the 10% it promised |
 
 ## What was built
 
@@ -55,27 +55,29 @@ of runs that certified a threshold truly missing more than α was:
 
 | within-group correlation | per-sample (old) | cluster-aware (new) |
 |---|---|---|
-| 0.0 | 0.020 | 0.000 |
-| 0.5 | **0.085** | 0.000 |
-| 0.8 | **0.092** | 0.000 |
-| 0.95 | **0.120** | 0.000 |
+| 0.0 | 0.033 | 0.000 |
+| 0.5 | **0.070** | 0.000 |
+| 0.8 | **0.095** | 0.000 |
+| 0.95 | **0.177** | 0.003 |
 
 The allowed rate is 0.05.
 
-**It holds on data it never saw.** At the shipped threshold (`t̂ = 0.8259`,
-α = 0.10), 9.3% of vulnerable test-split samples are auto-approved, or 7.6%
-averaged per task group (95% cluster bootstrap 0.8–16.7%). Both are within
-the 10% target.
+**It holds on data it never saw.** At the shipped threshold (`t̂ = 0.8023`,
+α = 0.10), 9.3% of vulnerable test-split code is auto-approved averaged per
+task group (95% cluster bootstrap 1.8–19.2%), within the 10% target that
+the certificate bounds. Pooled per sample it is 10.7% (12 of 112), which a
+true 10% rate produces 45% of the time.
 
 **Generator shift.** The experiment was fixed to calibrate on the
 calibration split and judge each held-out model on data the ranker never
-trained on. Three of four models stay within 10% (2.9%, 3.7%, 7.0%).
-Codegemma comes in at 11.0% (10 of 91, P = 0.43 under a true 10% rate, so
-within noise). The old certificate gave 13.2% for codegemma on the same
-experiment.
+trained on. Three of four models stay within 10% (codellama 4.2%,
+deepseek-coder 3.5%, qwen2.5-coder 6.4%). Codegemma comes in at 10.5% (10
+of 95, P = 0.48 under a true 10% rate, so within noise). When the
+cluster-aware certificate was introduced (§13), the per-sample one gave
+13.2% for codegemma on the same experiment.
 
-**The cost.** Coverage drops from 56.4% to 48.8% at α = 0.10. At α = 0.05
-the honest certificate approves only 29.2%, which is why the shipped
+**The cost.** Coverage drops from 58.5% to 50.0% at α = 0.10. At α = 0.05
+the honest certificate approves only 31.5%, which is why the shipped
 operating point stays at 0.10.
 
 ## What would improve it

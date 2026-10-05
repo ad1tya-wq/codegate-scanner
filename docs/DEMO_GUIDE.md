@@ -143,13 +143,13 @@ isn't finished yet.
 | How many tests? | 442, all passing (CI runs on Python 3.11 and 3.13) |
 | How many CWEs? | 3 — SQL injection, OS command injection, hardcoded credentials |
 | Certified guarantee? | Averaged over tasks, at most 10% of vulnerable functions auto-approved, 95% confidence (α = 0.10, δ = 0.05), counting each task once; 5% also certified via `--alpha 0.05` |
-| Does it hold on unseen data? | Yes: 7.6% per task (9.3% per sample) of held-out vulnerable code auto-approved, against 10% |
+| Does it hold on unseen data? | Yes: 9.3% per task of held-out vulnerable code auto-approved, against the 10% bound (10.7% pooled per sample, which is not the certified quantity) |
 | Precision / recall without the verifier? | 0.27 / 1.00 on the demo app: catches every vulnerability, escalates most safe code |
 | Precision with the verifier? | Not yet re-measured on the real model (was 1.00 on the simulated one) |
-| Ranker accuracy? | ROC-AUC 0.889 on held-out data it never trained on |
+| Ranker accuracy? | ROC-AUC 0.903 on held-out data it never trained on |
 | Real corpus size? | 2,040 samples: 510 prompts × 4 models (qwen2.5-coder, deepseek-coder, codellama, codegemma) |
-| Real corpus abstention rate? | 6.6% (was 28.3% before the labeller fixes, see section 12) |
-| Does it generalize to a new model? | Calibrated on 3 models, tested on the 4th: 3 of 4 within 10%; codegemma 11.0% (10 of 91, not significant) |
+| Real corpus abstention rate? | 5.6% (was 28.3% before the labeller fixes of section 12, 6.6% before the label audit of sections 14–15) |
+| Does it generalize to a new model? | Calibrated on 3 models, tested on the 4th: 3 of 4 within 10%; codegemma 10.5% (10 of 95, not significant) |
 | Cost per scan? | Estimated, disclosed as an estimate; demo app costs under $0.001 with the verifier on |
 
 ## 5 · If something breaks live
