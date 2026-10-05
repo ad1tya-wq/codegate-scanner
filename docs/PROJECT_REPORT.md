@@ -45,9 +45,12 @@ function for how safe it looks. A statistical procedure from conformal
 prediction, **Learn-Then-Test (LTT)**, then picks a score threshold above
 which functions are auto-approved, together with a *proof-style guarantee*:
 
-> Of the vulnerable functions that reach the gate, at most a fraction α
-> score above the threshold and get auto-approved — and this holds with
-> probability at least 1 − δ.
+> Averaged over coding tasks, at most a fraction α of the vulnerable
+> functions that reach the gate score above the threshold and get
+> auto-approved — and this holds with probability at least 1 − δ.
+
+(Averaged over tasks because each task counts once as evidence; section
+2.2 explains why.)
 
 Everything below the threshold is escalated to an LLM verifier, so LLM
 spend is confined to the code the certificate cannot vouch for. A
@@ -807,8 +810,6 @@ bank is, not something the statistics can check.
   validation demands real directories or paths under a base directory that
   no generated value satisfies. These samples are excluded, not mislabelled,
   but they are valuable hard negatives.
-- Three credential shapes remain undetected: vendor constructors taking a
-  key positionally.
 - The live verifier has not been re-measured on the real model.
 - Cost figures are estimates (placeholder price table, characters ÷ 4).
 - The sandbox is process-level isolation, adequate for code the team's own
@@ -826,6 +827,15 @@ bank is, not something the statistics can check.
 3. Better harness values for path- and directory-validated code.
 4. A code-embedding ranker for more coverage at the same guarantee.
 5. More CWEs, each only once it has a reliable automatic ground truth.
+6. **Ship the audited labels.** A label-by-label audit on 2026-10-05 found
+   34 vulnerable samples labelled SAFE or not judged, mostly
+   command-injection code judged by the labelling machine's own shell
+   instead of POSIX shell rules. The corrected oracles are on branch
+   `wip/label-audit-2026-10-05`; measured there, every audited error is
+   fixed with no new false alarms on safe prompts, held-out ROC-AUC rises
+   from 0.889 to 0.902, and the certificate stays within bound on held-out
+   data (9.3% per task against 10%). Details:
+   `docs/ENGINEERING_LOG.md` §14.
 
 ---
 

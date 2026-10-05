@@ -47,8 +47,9 @@ The gate is the actual contribution. It is built on **Learn-Then-Test
 al., ICLR 2024). Concretely: a lightweight ranker scores every function
 from 0 to 1 (higher = safer), and a calibration procedure certifies the
 most permissive auto-approval threshold `t_hat` such that the share of
-*vulnerable* functions scoring above `t_hat` (the miss rate) is provably
-below a chosen `alpha` (10% in the shipped model), with a chosen
+*vulnerable* functions scoring above `t_hat` (the miss rate), averaged over
+coding tasks, is provably below a chosen `alpha` (10% in the shipped
+model), with a chosen
 confidence `1 - delta` (95%). This guarantee is **distribution-free and
 finite-sample** — it does not assume the ranker is good. A bad ranker just
 certifies a lower coverage (more gets escalated), never a false guarantee.

@@ -276,8 +276,13 @@ def _certificate_flowables(styles, result: ScanResult) -> list:
     flow.append(table)
     flow.append(Spacer(1, 6))
     flow.append(Paragraph(
-        f"What this guarantees: of vulnerable functions, at most {calib.alpha:.2%} "
-        f"score at or above t_hat and are auto-approved, with {1 - calib.delta:.2%} "
+        # The cluster-aware test bounds the miss rate averaged over task
+        # groups (each task weighted equally), not pooled over functions.
+        ("What this guarantees: averaged over coding tasks, at most "
+         f"{calib.alpha:.2%} of a task's vulnerable functions "
+         if calib.method == "cluster-hb" else
+         f"What this guarantees: of vulnerable functions, at most {calib.alpha:.2%} ")
+        + f"score at or above t_hat and are auto-approved, with {1 - calib.delta:.2%} "
         "confidence -- a distribution-free certificate (Learn-Then-Test "
         "conformal risk control), not a heuristic claim. "
         + ("Each task group in the calibration data counts as one piece of "

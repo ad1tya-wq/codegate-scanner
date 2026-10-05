@@ -60,9 +60,9 @@ codegate info
 calibrated in the repo, so this runs with zero setup. The model was
 trained on about two thousand code samples written by four real LLMs,
 and every sample was labelled by actually running it against an attack.
-This table is the statistical guarantee: of the vulnerable functions it
-sees, at most 10% score above this threshold and get auto-approved, with
-95% confidence. Each task counts once as evidence, however many models
+This table is the statistical guarantee: averaged over coding tasks, at
+most 10% of vulnerable functions score above this threshold and get
+auto-approved, with 95% confidence. Each task counts once as evidence, however many models
 answered it, so correlated answers can't inflate the guarantee. A stricter
 5% threshold is also certified, if you want it."*
 
@@ -142,7 +142,7 @@ isn't finished yet.
 |---|---|
 | How many tests? | 442, all passing (CI runs on Python 3.11 and 3.13) |
 | How many CWEs? | 3 — SQL injection, OS command injection, hardcoded credentials |
-| Certified guarantee? | At most 10% of vulnerable functions auto-approved, 95% confidence (α = 0.10, δ = 0.05), counting each task once; 5% also certified via `--alpha 0.05` |
+| Certified guarantee? | Averaged over tasks, at most 10% of vulnerable functions auto-approved, 95% confidence (α = 0.10, δ = 0.05), counting each task once; 5% also certified via `--alpha 0.05` |
 | Does it hold on unseen data? | Yes: 7.6% per task (9.3% per sample) of held-out vulnerable code auto-approved, against 10% |
 | Precision / recall without the verifier? | 0.27 / 1.00 on the demo app: catches every vulnerability, escalates most safe code |
 | Precision with the verifier? | Not yet re-measured on the real model (was 1.00 on the simulated one) |
