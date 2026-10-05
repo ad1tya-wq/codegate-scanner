@@ -56,16 +56,16 @@ Repeat until clean: build (editable install), unit tests, integration tests, ful
 
 ## Task 4: Retrain to scratch and compare (G4, G5)
 
-- [ ] **Step 1:** `python scripts/train_from_pregenerated.py data/runs/real_sym/generations.parquet --out-dir data/runs/real_sym_v10 --corpus-version real-2040-sym`
-- [ ] **Step 2:** `python scripts/run_eval.py --model-dir data/runs/real_sym_v10`
-- [ ] **Step 3:** Table: shipped (`data/model`) vs v9 vs v10 for abstention, vulnerable rate, n_vuln_calib / groups, t̂, coverage, held-out miss rate per task and per sample with cluster bootstrap CI, ROC-AUC, generator shift, demo scan precision/recall.
+- [x] **Step 1:** `python scripts/train_from_pregenerated.py data/runs/real_sym/generations.parquet --out-dir data/runs/real_sym_v10 --corpus-version real-2040-sym`
+- [x] **Step 2:** `python scripts/run_eval.py --model-dir data/runs/real_sym_v10`
+- [x] **Step 3:** Table: shipped (`data/model`) vs v9 vs v10 for abstention, vulnerable rate, n_vuln_calib / groups, t̂, coverage, held-out miss rate per task and per sample with cluster bootstrap CI, ROC-AUC, generator shift, demo scan precision/recall.
 
 ## Task 5: Promote and document (G5, G6)
 
-- [ ] **Step 1:** Copy the v10 artifacts into `data/model/`; commit as the promotion.
-- [ ] **Step 2:** Update every number in `README.md`, `docs/PROJECT_REPORT.md`, `docs/ENGINEERING_LOG.md` (new section 15 + section 14.4 results), `docs/datasheet.md`, `docs/DESIGN_RATIONALE.md`, `docs/PANEL_QA.md`, `docs/TEAM_BRIEFING.md`, `docs/DEMO_GUIDE.md`, `docs/reports/*.md`, `docs/LABEL_AUDIT_HANDOFF.md` (status: shipped).
-- [ ] **Step 3:** Regenerate `docs/word/*.docx` and `examples/vulnerable_app/sample_report.pdf`.
-- [ ] **Step 4:** Grep for every superseded number; none may remain outside history sections.
+- [x] **Step 1:** Copy the v10 artifacts into `data/model/`; commit as the promotion.
+- [x] **Step 2:** Update every number in `README.md`, `docs/PROJECT_REPORT.md`, `docs/ENGINEERING_LOG.md` (new section 15 + section 14.4 results), `docs/datasheet.md`, `docs/DESIGN_RATIONALE.md`, `docs/PANEL_QA.md`, `docs/TEAM_BRIEFING.md`, `docs/DEMO_GUIDE.md`, `docs/reports/*.md`, `docs/LABEL_AUDIT_HANDOFF.md` (status: shipped).
+- [x] **Step 3:** Regenerate `docs/word/*.docx` and `examples/vulnerable_app/sample_report.pdf`.
+- [x] **Step 4:** Grep for every superseded number; none may remain outside history sections.
 
 ## Task 6: Merge (all gates)
 
@@ -117,3 +117,31 @@ Against the **shipped** labels (`data/model/labeled.parquet`, the model on `main
 | 798 / various | ABSTAIN to SAFE/VULN | 7 | extraction now finds the full code (fix 5) |
 
 **Deferred / open:** none new. Next: Task 4 (retrain to `data/runs/real_sym_v10`).
+
+### 2026-10-05, report 3
+
+**Shipped:** Task 4 (retrain and compare) and Task 5 (promote and document). Promotion commit `5fe4b91`; last commit on the branch `b28d3bf`.
+
+**Retrain (G4, G5).** Run v10 (`data/runs/real_sym_v10`), compared with the previous model under identical evaluation code:
+
+| | previous model | v10 (promoted) |
+|---|---|---|
+| t̂ / coverage at α = 0.10 | 0.8259 / 48.8% | 0.8023 / 50.0% |
+| t̂ / coverage at α = 0.05 | 0.9091 / 29.2% | 0.8916 / 31.5% |
+| vulnerable calibration samples / groups | 206 / 66 | 218 / 66 |
+| held-out ROC-AUC | 0.889 | 0.903 |
+| held-out miss rate per task (certified) | 7.6% | 9.3% (bound 10%) |
+| held-out miss rate per sample | 9.3% | 10.7% |
+| generator shift | 3 of 4 within α; codegemma 11.0% | 3 of 4 within α; codegemma 10.5% |
+| demo scan, static + gate | recall 1.00, precision 0.27 | unchanged |
+
+G4 holds: certified, and 9.3% ≤ 10% per task on held-out data. G5, stated as worse: the held-out miss rate rose 7.6% to 9.3% per task and the per-sample figure is now above 10% (not the certified quantity). Cause, measured: on the same corrected test labels the previous model also misses 7.6%, so the rise is v10's lower threshold, which its larger correct calibration evidence licenses. Promoted on the precedent of §13.1 (never select a model on the test split). Validity simulation rerun with v10's group sizes: cluster-aware ≤ 0.3% failures at every correlation, per-sample up to 17.7% (allowed 5%).
+
+**Documents (G6).** Updated: `README.md`, `docs/PROJECT_REPORT.md` (new §8.10), `docs/PANEL_QA.md` (new Q&A on the audit), `docs/TEAM_BRIEFING.md`, `docs/DEMO_GUIDE.md`, `docs/DESIGN_RATIONALE.md`, `docs/cluster-aware-certificate/README.md`, `docs/reports/1–3`, `docs/FUNCTION_REFERENCE.md`, `docs/LABEL_AUDIT_HANDOFF.md` (status: shipped), `docs/ENGINEERING_LOG.md` (new §15, test inventory). The six `docs/word/*.docx` were synced block by block from each Markdown file's change since `main`, in place (cover, contents, headers and styles kept), then checked: every current Markdown block present, no removed block left, each file renders (LibreOffice). `examples/vulnerable_app/sample_report.pdf` regenerated (t̂ 0.8023). A grep for every superseded number finds only before/after comparisons and dated history.
+
+**Tested (G1).** Full suite on the final commit: **515 passed on Python 3.13** (scikit-learn 1.7.2) and **515 passed on Python 3.11** (scikit-learn 1.9.1, what CI installs), semgrep 1.179 installed. CI's clean-install job reproduced in a fresh venv with base dependencies only: `codegate info`, and `scan` in terminal, JSON, SARIF and PDF all pass.
+
+**Deferred / open:**
+- Task 6 (push, CI on GitHub, merge into `main`) is run by the owner: this session has no push access.
+- The git-ignored companions of the old model (`data/model/labeled.parquet`, `scores_r2.parquet`, ...) are backed up in `data/runs/model_pre_audit_2026-10-05/`; after the merge, copy `data/runs/real_sym_v10/*` into `data/model/` so `scripts/run_eval.py` reads v10's labels and scores.
+- Prompt CWE-798-027 should pin `private_key` before the next generation run.
