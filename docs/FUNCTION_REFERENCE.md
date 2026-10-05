@@ -275,11 +275,13 @@ presently unexercised by the pipeline.
 
 ## oracles/
 
-Ground-truth labelers for the OFFLINE research corpus: two dynamic
-(detonation-based) oracles for CWE-89/CWE-78, one static oracle for
-CWE-798, the shared machinery the dynamic pair runs on (a sandbox
-executor, a signature-aware invocation helper, a recording DB-API
-connection), an AST helper, the consensus rule that turns an oracle verdict
+Ground-truth labelers for the OFFLINE research corpus: two dynamic oracles
+for CWE-89/CWE-78 (the generated function really runs; the database call
+or process start it reaches is recorded instead of performed), one static
+oracle for CWE-798, the shared machinery the dynamic pair runs on (a
+sandbox executor, a signature-aware invocation helper, a recording DB-API
+connection, a recording stand-in for every process-starting call), AST
+helpers, the consensus rule that turns an oracle verdict
 into a label, and the semgrep wrapper (used by the ONLINE scanner's static
 pre-pass and the OFFLINE semgrep baseline — not by labelling).
 
@@ -289,7 +291,8 @@ script and hands it to `run_sandboxed`:
 ```
 HARNESS_PRELUDE              (invocation.py: stub finder for absent imports,
                               benign-value helpers, signature reader)
-[RECORDER_SOURCE]            (dbapi_recorder.py: SQLi only)
+RECORDER_SOURCE              (dbapi_recorder.py for SQLi; shell_recorder.py
+                              for cmdi, installed before the code runs)
 guarded_exec_source(code)    (the generated code, exec'd inside a guard)
 harness                      (per-oracle: control run, payload runs, verdict print)
 ```
@@ -302,10 +305,38 @@ always rests on that positive evidence; no evidence is an abstention
 
 ### oracles/ast_utils.py
 
+#### `oracles.ast_utils.parses(code: str) -> bool`
+**Does:** Whether `code` is syntactically valid Python (`SyntaxWarning`s
+from generated code's `"\d"` strings are silenced; a `ValueError` for null
+bytes counts as not parsing).
+**Talks to:** Called first by `check_sqli` and `check_cmdi`, which abstain
+on code that doesn't parse, and by `research/pipeline.py::extract_code` to
+prefer a parseable block.
+**Tech:** `ast`, `warnings`.
+**Fits in:** OFFLINE. Before 2026-10-05 the dynamic oracles returned SAFE
+for unparseable code whenever no sink keyword appeared in it. That
+included a bare signature whose body extraction had lost, so four
+vulnerable command-injection samples were labelled SAFE; 24 more
+unparseable samples were labelled SAFE without evidence.
+
+#### `oracles.ast_utils.module_level_functions(tree: ast.AST) -> list`
+**Does:** The `def`/`async def` nodes a module binds as globals, in source
+order: top-level ones and those under a module-level `if`/`for`/`while`/
+`with`/`try`, but not methods or functions nested in functions. The
+harnesses call the entry point by its global name, so only these can be
+called.
+**Talks to:** Called by `function_exists` and
+`research/pipeline.py::_function_names`.
+**Tech:** `ast`.
+**Fits in:** OFFLINE.
+
 #### `oracles.ast_utils.function_exists(code: str, function_name: str) -> bool`
-**Does:** Parses `code` and returns `True` if it defines a (possibly
-nested) function named `function_name`; returns `False` on a syntax error
-or if no such function exists.
+**Does:** Parses `code` and returns `True` if it defines a module-level
+function (sync or async) named `function_name`; returns `False` on a
+syntax error or if no such function exists. A method of the same name does
+not count: the harness resolves the name in module globals, where
+`Scanner.run` is not bound and `run` may be an imported `subprocess.run`.
+Until 2026-10-05 it matched any nested `def` and missed `async def`.
 **Talks to:** Called by `oracles/sqli_oracle.py::check_sqli` and
 `oracles/cmdi_oracle.py::check_cmdi`, both as a pre-check before attempting
 to detonate the snippet (no point sandboxing code whose target function
@@ -315,6 +346,12 @@ doesn't exist). Calls `ast.parse`, `ast.walk`.
 oracles before detonation.
 
 ### oracles/sandbox.py
+
+`SANDBOX_TIMEOUTS_S = (15.0, 60.0)` — wall-clock budgets for one
+detonation, tried in order by both dynamic oracles: a run that times out is
+retried once with the longer budget before the oracle abstains. A timeout
+is a property of the machine's load, not of the code: one real sample took
+~11 s and abstained in one full labelling run but not the next.
 
 #### `oracles.sandbox._kill_process_tree(pid: int) -> None`
 **Does:** Kills a process and every descendant it spawned — on Windows via
@@ -342,8 +379,8 @@ so no zombie lingers). Documented as best-effort process-level isolation
 only (no network disable, no container, no read-only filesystem) — the
 docstring is explicit that this must be swapped for a real container
 sandbox before running against untrusted LLM-generated code at scale. Both
-oracles now pass the fully assembled script as `code` and an empty
-`harness`, with `timeout_s=15.0`.
+oracles pass the fully assembled script as `code` and an empty `harness`,
+with each budget in `SANDBOX_TIMEOUTS_S` in turn.
 **Talks to:** Called by `oracles/sqli_oracle.py::check_sqli` and
 `oracles/cmdi_oracle.py::check_cmdi`. Calls `subprocess.Popen`,
 `_kill_process_tree`.
@@ -366,14 +403,20 @@ path back to this repo.
 
 #### `oracles.invocation.benign_value_for(param_name: str) -> str | int`
 **Does:** A type-plausible, harmless argument chosen from a parameter's
-name: `"name"` for column-like names (`sort_column`, `order_by`),
-`"2024-01-01"` for date-like names, `1` for numeric-looking names
-(`user_id`, `width`, `port`), otherwise `"alice"`. Order matters — the more
-specific hint wins (`start_date` is a date, not a number).
+name, checked in this order: `"alice@example.com"` for email-like names,
+`"https://example.com/alice"` for URL-like names (`url`, `endpoint`),
+`"example.com"` for host-like names (`host`, `domain`, `server`), `"name"`
+for column-like names (`sort_column`, `order_by`), `"2024-01-01"` for
+date-like names, `1` for numeric-looking names (`user_id`, `width`,
+`port`), otherwise `"alice"`. Order matters — the more specific hint wins
+(`start_date` is a date, not a number; `endpoint` is a URL, not an end
+date). The email/URL/host hints were added 2026-10-05: near-miss code
+validates those formats with a regex and rejected `"alice"` on every call,
+so 25 samples never reached their sink and abstained.
 **Talks to:** Its sandbox twin (same body, inside `HARNESS_PRELUDE`) is
 called by `benign_vectors`. The in-process copy exists for tests.
-**Tech:** none — substring checks against `NUMERIC_HINTS`, `DATE_HINTS`,
-`COLUMN_HINTS`.
+**Tech:** none — substring checks against `EMAIL_HINTS`, `URL_HINTS`,
+`HOST_HINTS`, `COLUMN_HINTS`, `DATE_HINTS`, `NUMERIC_HINTS`.
 **Fits in:** OFFLINE — lets a multi-argument function be invoked at all.
 The original harnesses called `f(conn, payload)` / `f(payload)` with fixed
 arity and abstained on ~44% of the dynamic prompt bank.
@@ -507,6 +550,98 @@ function as its `conn` argument.
 trace callback. Both required SQLite to accept the statement, which lost
 every Postgres-idiom sample.
 
+### oracles/shell_recorder.py
+
+A recording stand-in for every way Python code starts a process, used by
+the CWE-78 harness. The generated function genuinely runs; only the last
+step, starting the process, is replaced by a record of the command it
+would have run. Stdlib only; its source is exported as `RECORDER_SOURCE`.
+It replaced real execution on 2026-10-05: running the command made the
+ground truth depend on the labelling machine's shell (on Windows, cmd.exe
+treats `"..."` and `'...'` differently from a POSIX shell), and a full-corpus
+audit found 20 vulnerable samples labelled SAFE that way. See
+`docs/ENGINEERING_LOG.md` §14.
+
+#### `oracles.shell_recorder.shell_command_line(args, shell: bool) -> str | None`
+**Does:** The string a POSIX shell would interpret for one invocation, or
+`None` when no shell is involved. `shell=True` with a string: the string;
+with a list: its first element (what POSIX `subprocess` hands to
+`/bin/sh -c`). `shell=False`: `None`, except an argv that starts a POSIX
+shell with `-c` (`["bash", "-c", cmd]`, `["/bin/sh", "-lc", cmd]`), which
+returns `cmd`. Wrapper commands in front are skipped by `_unwrap` (`env`
+with its options and `VAR=value` assignments, `timeout 5`, `nice -n 5`,
+`sudo`, `nohup`, `stdbuf`, `setsid`, `chroot`, `xargs` and others, nested
+up to eight deep), and `_shell_c_argument` reads only the shell's own
+options before its first operand: `["bash", "backup.sh", "-c", x]` runs a
+script and passes it `-c x`, so it returns `None`.
+**Talks to:** Called by `ShellRecorder._record`. Calls `_unwrap`,
+`_shell_c_argument`.
+**Tech:** `os.path`.
+**Fits in:** OFFLINE — decides which recorded calls can be injected at all.
+
+#### `oracles.shell_recorder.marker_runs_as_command(command_line: str, marker: str) -> bool`
+**Does:** Returns `True` when `marker` is in `command_starts(command_line)`:
+the first word of a command of its own, after `;`, `&`, `&&`, `|`, `||`,
+`|&`, `;;` or a newline, or inside a command substitution (`$( )`,
+backticks, `<( )`), including inside double quotes. That is the definition
+of command injection: the input stopped being data inside one command and
+started another. A `shlex.quote`d value, or a double-quoted value with
+`"`, `$` and backticks escaped, stays one word and never fires. A
+malformed command line (unclosed quote or substitution) is not a hit.
+**Talks to:** Called by `ShellRecorder.injected`. Calls `command_starts`.
+**Tech:** none beyond stdlib.
+
+#### `oracles.shell_recorder.command_starts(command_line: str) -> list[str] | None`
+**Does:** Tokenises the line the way a POSIX shell does and returns the
+first word of every simple command it would run, or `None` when the line
+is malformed. Handles single quotes (fully literal), double quotes (only
+`$`, backticks, `"`, `\` and newline escapable; substitutions inside are
+parsed recursively), backslash escapes and line continuation, `$((...))`
+and `${...}` (skipped), `$( )`, backticks and process substitution
+(recursive), control operators, redirections (the filename after one is
+not a command, and `2>` keeps its fd), subshell parentheses, `VAR=value`
+prefixes and reserved words (`!`, `{`, `then`, `do`, `if`, ...). `#`
+starts a comment only where a word would start: `issue#1` is one word.
+Replaced `shlex` on 2026-10-05, which treated `#` inside a word as a
+comment and never looked inside substitutions.
+**Talks to:** Called by `marker_runs_as_command`. Internals: `_parse`,
+`_collect_starts`, `_dollar`, `_skip_balanced`, `_backtick_body`,
+`_Malformed`.
+**Tech:** `re`.
+**Fits in:** OFFLINE — the injection test itself, judged by shell grammar
+instead of by whichever shell the labelling machine has.
+
+#### `class oracles.shell_recorder.ShellRecorder`
+**Does:** `install()` replaces `subprocess.Popen/run/call/check_call/
+check_output/getoutput/getstatusoutput`, `os.system`, `os.popen`, the
+`os.exec*`/`os.spawn*`/`posix_spawn*` family, `asyncio.create_subprocess_
+shell/exec`, `pty.spawn` and `shutil.which` with recorders. Each call
+appends `(command_line_or_None, args)` to `calls` and returns what a
+successful, silent command would (exit status 0, empty output in the
+requested text or bytes mode; fake `Popen` objects support `communicate`,
+`wait`, `poll`, pipes and `with`). `shutil.which` reports every tool as
+installed, so code that checks for ffmpeg first still builds its command.
+`os.exec*`, `os.spawn*` and `posix_spawn*` are decoded per signature family
+by `_argv_of` (`execl(path, *argv)`, `spawnl(mode, path, *argv)`,
+`execve(path, argv, env)`, ...), with the program path in place of
+`argv[0]`, so `os.spawnl(os.P_WAIT, "/bin/sh", "sh", "-c", cmd)` is seen as
+a shell. `asyncio.subprocess.create_subprocess_shell/exec` and
+`BaseEventLoop.subprocess_shell/exec` are recorded too.
+`reset()` clears the calls; `observed` is true once any process call was
+attempted (not evidence by itself); `reached(values)` is true when a
+recorded call carries one of `values` (strings of three or more characters
+as substrings, shorter ones and numbers as whole words; the argv, the
+command string and, for `shell=True` lists, the shell's positional
+arguments all count); `injected(marker)` applies `marker_runs_as_command`
+to every recorded command line.
+**Talks to:** Installed by the cmdi harness before the generated code runs
+(so `from subprocess import run` binds the recorder too); read by the
+harness's `_invoke`.
+**Tech:** `subprocess`, `os`, `io`, `asyncio`, `pty`, `shutil`.
+**Fits in:** OFFLINE — the observation point for CWE-78. Nothing the
+generated code tries to run is executed, which also removed the timeouts
+caused by real commands (a module-level `npm install` in one sample).
+
 ### oracles/sqli_oracle.py
 
 #### `oracles.sqli_oracle.has_sql_sink(code: str) -> bool`
@@ -537,9 +672,10 @@ turn and prints `CODEGATE_VERDICT=VULNERABLE|SAFE|NOEVIDENCE`.
 **Fits in:** OFFLINE.
 
 #### `oracles.sqli_oracle.check_sqli(code: str, function_name: str) -> bool | None`
-**Does:** The CWE-89 dynamic oracle. Returns `False` immediately when
-`has_sql_sink` is false, `None` when the function is absent, otherwise runs
-the `_build_source` script in the sandbox (15 s). `True` when the payload
+**Does:** The CWE-89 dynamic oracle. Returns `None` when the code doesn't
+parse, `False` when `has_sql_sink` is false, `None` when the function is
+absent, otherwise runs the `_build_source` script in the sandbox (15 s,
+retried once at 60 s on a timeout). `True` when the payload
 reached an executed statement as query *text* (the definition of SQL
 injection); `False` only when SQL was observed and the payload never
 reached it as text; `None` on timeout or no observation. Statement-type
@@ -548,46 +684,89 @@ longer calls a parameterized `SELECT COUNT(*)` vulnerable.
 **Talks to:** Called by `research/pipeline.py::label_row` (for every
 `CWE-89` sample, trying candidate function names in turn) and
 `research/eval/metrics.py::oracle_accuracy_on_fixtures`. Calls
-`has_sql_sink`, `ast_utils.function_exists`, `_build_source`,
-`sandbox.run_sandboxed`.
+`ast_utils.parses`, `has_sql_sink`, `ast_utils.function_exists`,
+`_build_source`, `sandbox.run_sandboxed`.
 **Tech:** `sqlite3` (inside the sandbox only).
 **Fits in:** OFFLINE — the ground-truth labeler for CWE-89.
 
 ### oracles/cmdi_oracle.py
 
 #### `oracles.cmdi_oracle.has_shell_sink(code: str) -> bool`
-**Does:** Cheap lexical scope check — does `code` contain any marker
+**Does:** Cheap scope check — does `code` contain any marker
 suggesting it might invoke a shell or spawn a process (`subprocess`,
-`os.system`, `os.popen`, `pty.spawn`, `shell=true`, etc.,
-case-insensitive)? Same over-inclusive rationale as
-`sqli_oracle.has_sql_sink`.
+`os.system`, `os.popen`, `os.exec`, `os.spawn`, `posix_spawn`, `pty.spawn`,
+`shell=true`, etc., case-insensitive), or, via `_imports_process_function`,
+import a process function by name (`from os import system`), call one
+through a module alias (`import os as o; o.system`), or use
+`__import__`? Same over-inclusive rationale as `sqli_oracle.has_sql_sink`:
+a miss here is a confident SAFE on code that never ran.
 **Talks to:** Called only by `check_cmdi` in this same module. Calls
-nothing else.
+`_imports_process_function`.
 **Tech:** none beyond stdlib string methods.
 **Fits in:** OFFLINE — lets `check_cmdi` return a confident `False` for
 code that can't plausibly invoke a shell.
 
+#### `oracles.cmdi_oracle.build_payloads(marker: str, prefixes: list[str], suffixes: list[str]) -> list[str]`
+**Does:** One breakout payload per quoting context the value might land
+in — unquoted `127.0.0.1; <marker> #`, double-quoted `x"; <marker> #`,
+single-quoted `x'; <marker> #` — plus command substitution (`$(<marker>)`,
+backticks), a payload with no spaces (`127.0.0.1;<marker>;#`) and other
+separators (`|`, `&&`, a newline), because a blocklist of spaces or of
+`;` is not sanitisation; each also with every harvested suffix
+appended (after the `#`, so it is commented out) and every harvested prefix
+prepended. The trailing `#` turns whatever the code appends after the value
+(`{src}/`, `{path}.bak`) into a shell comment; the old payload's redirect
+broke on exactly that.
+**Talks to:** Called by `_build_source`; prefixes/suffixes come from
+`invocation.harvest_affixes`.
+**Tech:** none.
+**Fits in:** OFFLINE.
+
+#### `oracles.cmdi_oracle._build_source(code: str, function_name: str, marker: str) -> str`
+**Does:** Assembles the sandbox script: `HARNESS_PRELUDE`, the
+shell-recorder source (with `from __future__` lines stripped), a line that
+installs the recorder, a patch that makes every path containing this
+call's marker exist while the switch `_CG_PAYLOAD_PATHS_EXIST[0]` is on
+(`os.path.exists/lexists/isfile/isdir`,
+`pathlib.Path.exists/is_file/is_dir`; an existence check is not
+sanitisation, since a file can be named `x'; cmd #`), the guarded generated
+code, then the harness. Both patches go in before the generated code runs,
+so `from os.path import isfile` binds them too. The harness creates real
+paths in its temporary working directory (`cg_dir`, `cg_file.txt`, a file
+per harvested filename such as `alice.zip`) and offers `.`, `cg_dir`,
+`cg_file.txt` as extra benign candidates, for code that checks
+`os.path.exists()` before running its tool. It runs the control run over
+`benign_vectors` until `_input_reached` confirms an argument reached a
+process call (it changes that argument and re-records; a call that does
+not change, such as a `--version` preflight, is not evidence), then each
+payload in each parameter position, first with payload paths reported
+missing and then existing (so `if exists(p): raise` code is judged too),
+and prints `CODEGATE_VERDICT=VULNERABLE|SAFE|NOEVIDENCE`. `SystemExit` from the generated code is caught too.
+**Talks to:** Called only by `check_cmdi`. Calls `harvest_affixes`,
+`build_payloads`, `benign_candidates`, `guarded_exec_source`.
+**Tech:** string templating.
+**Fits in:** OFFLINE.
+
 #### `oracles.cmdi_oracle.check_cmdi(code: str, function_name: str) -> bool | None`
-**Does:** The CWE-78 dynamic oracle. Payload:
-`127.0.0.1 & echo pwned > <sentinel file>` (`&` sequences commands in both
-`cmd.exe` and POSIX sh), plus affixed variants when the code checks a
-suffix or prefix (`... & echo cg.zip`, `https://...`). The harness defines
-`_reached_a_spawn(args)`, which calls the function and counts it as having
-reached a process spawn if it returns normally *or* raises
-`FileNotFoundError`. That exception only happens on the `shell=False`
-path, because a shell always exists, so it is SAFE evidence. The harness
-runs the control run over `benign_vectors`, then each payload in each
-position, and prints `CODEGATE_DONE` or `CODEGATE_NOEVIDENCE`. Verdict
-order matters: **a written sentinel is `True` unconditionally**, because
-it is direct proof. Code that parses the command's output afterwards
-(`int(output.split()[0])`) raises after the payload has run, and that used
-to read as "no evidence". Then timeout → `None`, no `CODEGATE_DONE` →
-`None`, otherwise `False`.
+**Does:** The CWE-78 dynamic oracle. Returns `None` when the code doesn't
+parse, `False` when `has_shell_sink` is false, `None` when the function is
+absent, otherwise runs the `_build_source` script in the sandbox (15 s,
+retried once at 60 s). `True` when a payload's marker became a command of
+its own in a command line the function handed to a shell, judged by POSIX
+shell grammar (`shell_recorder.marker_runs_as_command`); `False` when a
+process call was observed and no payload broke out (argv lists with
+`shell=False`, `shlex.quote`, allowlist validation); `None` when the
+function takes no parameters or its input never reached a process call. Nothing is
+executed, so the verdict is the same on Windows and Linux. The previous
+design (2026-09 to 2026-10-04) ran the command and looked for a sentinel
+file; on the Windows labelling machine that missed double- and
+single-quoted interpolation and any command that appended text after the
+value.
 **Talks to:** Called by `research/pipeline.py::label_row` (for every
 `CWE-78` sample) and `research/eval/metrics.py::oracle_accuracy_on_fixtures`.
-Calls `has_shell_sink`, `ast_utils.function_exists`, `harvest_affixes`,
-`benign_candidates`, `guarded_exec_source`, `sandbox.run_sandboxed`.
-**Tech:** `tempfile`, `uuid`, `pathlib.Path`.
+Calls `ast_utils.parses`, `has_shell_sink`, `ast_utils.function_exists`,
+`_build_source`, `sandbox.run_sandboxed`.
+**Tech:** `uuid` (a fresh marker per call), `re`.
 **Fits in:** OFFLINE — the ground-truth labeler for CWE-78.
 
 ### oracles/creds_oracle.py
@@ -608,6 +787,11 @@ code doesn't parse (an abstention, not a clearance). Otherwise returns
   `login|auth|credential|connect|bind` with two or more positional args,
   unless the password is passed by keyword (then that last positional
   argument is the username: `connect(host, 22, "deploy", password=...)`);
+- a random-looking token passed positionally into any call
+  (`PagerDuty("R0ut1ngK3y9f3a2b7c1d4e6f")`, `algoliasearch.Client("app",
+  "9f3a2b7c...")`): 16+ letters and digits with at least three of each, not
+  a placeholder (`_looks_like_token`). On every sample of four corpora this
+  fired only on vulnerable-flavor CWE-798 code;
 - a secret-named string followed by a literal in any call
   (`set_config("license_key", "...")`, `os.environ.get("JWT_SECRET",
   "...")`, the hardcoded-fallback case);
@@ -825,8 +1009,15 @@ evaluation/plotting subpackage.
 **Does:** Pulls the actual function implementation out of a real LLM's
 delimiter-wrapped completion. Tries three delimiter styles in order
 (markdown fences ```` ```python ... ``` ````, `[PYTHON]...[/PYTHON]` tags,
-`<pre>...</pre>` tags) and returns the *first* matched block that actually
-contains a `def` — not just the first block found, because some models
+`<pre>...</pre>` tags) and returns the first block that contains a `def`
+if it parses; otherwise the first later block that parses *and defines
+every function the first one does*; otherwise the first block (so the
+oracle abstains). Step-by-step answers (codellama) put the bare signature
+in its own block before the full code, and taking that fragment lost the
+function body (four vulnerable samples read as SAFE until 2026-10-05); a
+later block defining something else, such as a usage example's `main()`,
+is unrelated code and never replaces the implementation. It is the first
+block with a `def`, not just the first block found, because some models
 (codellama, observed in the real corpus) emit a second block that's a
 usage example rather than the implementation, and picking the wrong one
 would hand the oracle a function call instead of a function definition.
@@ -839,7 +1030,10 @@ samples, these fallbacks changed 16 extractions, none of which had parsed
 before; 15 now parse. Otherwise falls back to `raw` unchanged, which covers
 both a model that emits bare unwrapped code (starcoder2) and one that emits
 no usable code at all (a genuine non-answer that should abstain downstream
-rather than be forced into a false extraction). The
+rather than be forced into a false extraction). Finally, when the result
+doesn't parse, its dedented form or an extraction from the dedented answer
+is used if that parses: codellama sometimes indents its whole answer,
+fences included, by two spaces (18 neutral samples). The
 module-level comment records the empirical motivation: 40.7% oracle
 abstention on the real 516-sample corpus before this existed, because
 `ast.parse` on raw prose-wrapped text raised `SyntaxError` and the dynamic
@@ -847,30 +1041,45 @@ oracles fell back to names real models essentially never use.
 **Talks to:** Called by `run_full_pipeline`, unconditionally (not
 branched on `is_simulated` — it's a no-op on `SimulatedBackend`'s already
 clean output, so one code path serves both), and by `relabel`. Calls
-nothing else.
+`_extract_once` (the delimiter logic above) and `ast_utils.parses`.
 **Tech:** `re`, `textwrap`.
 **Fits in:** OFFLINE — a generation-output cleanup step, between raw
 generation and oracle labeling.
 
-#### `research.pipeline._first_function_name(code: str) -> str | None`
-**Does:** Returns the name of the first top-level function defined in
-`code`, or `None` on a syntax error or if there is none. Used to build a
-realistic candidate function name for a real model's output, since real
-models don't reliably use `SimulatedBackend`'s four template names
-(`handler`, `process`, `run_task`, `do_work`).
-**Talks to:** Called only by `label_row` in this same module. Calls
-`ast.parse`, `ast.walk`.
+#### `research.pipeline._function_names(code: str) -> list[str]`
+**Does:** The snippet's entry points, in source order, or `[]` when it
+doesn't parse: module-level functions (sync or async) that no other
+input-taking function calls or references. A helper such as `_run(cmd)`
+takes a whole command by design and is judged through its caller, which
+runs it. A zero-argument function (`main()` calling the real one with
+literals) cannot receive input, so its calls do not count and it is
+returned only when nothing else qualifies; with mutual recursion every
+function is returned. Methods are never returned.
+**Talks to:** Called only by `label_row`. Calls `ast.parse`, `ast.walk`,
+`ast_utils.module_level_functions`.
 **Tech:** `ast`.
+**Fits in:** OFFLINE — a labeling-time helper.
+
+#### `research.pipeline._judge_every_function(check, code: str, names: list[str]) -> bool | None`
+**Does:** Runs a dynamic oracle (`check_sqli` or `check_cmdi`) on each
+named function: `True` as soon as one is injectable, else `False` if at
+least one was judged safe, else `None`. The label describes the snippet,
+which is what the ranker trains on. Replaced `_first_function_name` on
+2026-10-05: judging only the first function let a validation helper defined
+first (`is_valid_hostname` before `scan_host`) stand in for the function
+the prompt asked for.
+**Talks to:** Called only by `label_row`.
+**Tech:** none.
 **Fits in:** OFFLINE — a labeling-time helper.
 
 #### `research.pipeline.label_row(row: pd.Series) -> dict`
 **Does:** Runs the appropriate oracle(s) for one generated snippet and
 applies the consensus rule, returning one `labeled`-schema row. Builds a
-candidate function-name list (the real first-defined function name,
-if found, tried first, then the four simulated-template names as
-fallback) and tries each against the dynamic oracle for CWE-89/CWE-78
-until one returns a non-`None` verdict; for CWE-798 runs the static
-`check_creds` oracle directly. Output columns: `sample_id`, `cwe`,
+candidate function-name list (the snippet's entry points from
+`_function_names`, in source order, then any of the four simulated-template names not already
+present) and judges all of them with the dynamic oracle for CWE-89/CWE-78
+via `_judge_every_function`; for CWE-798 runs the static `check_creds`
+oracle directly. Output columns: `sample_id`, `cwe`,
 `label`, `dynamic_verdict`, `static_verdict`, `consensus_rule_version`
 (`semgrep_hit` and `adjudicator_verdict` were dropped on 2026-10-04 with
 the adjudicator; they were written and never read, and the per-row semgrep
@@ -881,7 +1090,7 @@ bug where 540/540 CWE-89 samples abstained (wrong table names) and were
 all mislabeled safe before this distinction existed.
 **Talks to:** Called by `run_full_pipeline` (once per generated row) and
 directly by `tests/test_oracle_robustness.py`. Calls
-`_first_function_name`, `oracles/sqli_oracle.py::check_sqli`,
+`_function_names`, `_judge_every_function`, `oracles/sqli_oracle.py::check_sqli`,
 `oracles/cmdi_oracle.py::check_cmdi`, `oracles/creds_oracle.py::check_creds`,
 and `oracles/consensus.py::consensus_label`.
 **Tech:** none directly beyond stdlib; delegates all real work to the

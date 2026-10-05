@@ -93,3 +93,64 @@ def test_sink_shortcut_does_not_swallow_real_vulnerabilities():
     assert has_sql_sink('q = "select * from users"')
     assert has_shell_sink("subprocess.run(cmd, shell=True)")
     assert has_shell_sink("os.system(cmd)")
+
+
+# label_row used to judge only the first function in the snippet. A
+# validation helper defined first (ec3c359c-0: is_valid_hostname before
+# scan_host) was judged instead of the function the prompt asked for.
+HELPER_FIRST_SAFE = (
+    "import re, subprocess\n"
+    "def is_valid_hostname(h):\n"
+    "    return re.match(r'^[a-z0-9.-]+$', h) is not None\n"
+    "def scan_host(host, port):\n"
+    "    if not is_valid_hostname(host):\n"
+    "        raise ValueError(host)\n"
+    "    return subprocess.run(['nmap', '-p', str(port), host], capture_output=True)\n"
+)
+
+HELPER_FIRST_VULN = (
+    "import subprocess\n"
+    "def log_command(cmd):\n"
+    "    return subprocess.run(['logger', cmd])\n"
+    "def scan_host(host, port):\n"
+    "    cmd = f'nmap -p {port} {host}'\n"
+    "    log_command(cmd)\n"
+    "    return subprocess.run(cmd, shell=True, capture_output=True)\n"
+)
+
+
+def test_label_row_judges_every_function_not_only_the_first():
+    safe = label_row(pd.Series({"sample_id": "h1", "cwe": "CWE-78", "code": HELPER_FIRST_SAFE}))
+    assert safe["label"] == 0
+    # The helper alone reaches a safe argv call; the injectable function
+    # after it must still decide the label.
+    vuln = label_row(pd.Series({"sample_id": "h2", "cwe": "CWE-78", "code": HELPER_FIRST_VULN}))
+    assert vuln["label"] == LABEL_VULNERABLE
+
+
+def test_label_row_does_not_judge_a_generic_helper_as_the_entry_point():
+    # Code review: `_run(cmd)` takes a whole command by design; only the
+    # function a caller would call -- one nothing else in the snippet calls --
+    # is judged. Here that function quotes its input.
+    code = (
+        "import re, shlex, subprocess\n"
+        "def get_disk_usage(path):\n"
+        "    if not re.match(r'^[\\w/.-]+$', path):\n"
+        "        raise ValueError(path)\n"
+        "    return _run('du -sh ' + shlex.quote(path))\n"
+        "def _run(cmd):\n"
+        "    return subprocess.check_output(cmd, shell=True)\n"
+    )
+    assert label_row(pd.Series({"sample_id": "h3", "cwe": "CWE-78", "code": code}))["label"] == 0
+
+
+def test_label_row_does_not_judge_methods_as_module_functions():
+    # Code review: the harness resolves a name in module globals, so the
+    # method `Scanner.run` bound to the imported `run` instead.
+    code = (
+        "from subprocess import run\n"
+        "class Scanner:\n"
+        "    def run(self, target):\n"
+        "        return run(f'nmap {target}', shell=True)\n"
+    )
+    assert label_row(pd.Series({"sample_id": "h4", "cwe": "CWE-78", "code": code}))["label"] == LABEL_ABSTAIN

@@ -31,6 +31,16 @@ DATE_HINTS = ("date", "start", "end", "created", "updated", "since", "until")
 # never reaches its query, leaving the oracle with nothing to observe and
 # forcing an abstention on a sample that is in fact cleanly safe.
 COLUMN_HINTS = ("column", "sort", "order_by", "orderby", "field")
+# Parameters that near-miss code validates by format. A regex check rejects
+# "alice" on every call, so the code never reached its sink and abstained:
+# 25 email/host/URL samples in the shipped corpus (docs/ENGINEERING_LOG.md
+# section 14). Matched as whole words of the name, and skipped when its
+# last word is numeric: substring matching gave `server_port` a host name
+# and `security_level` (which contains "uri") a URL. Tried before the other
+# hints, since "endpoint" contains the date hint "end".
+EMAIL_HINTS = ("email", "mail")
+URL_HINTS = ("url", "uri", "endpoint", "link", "href")
+HOST_HINTS = ("host", "hostname", "domain", "server")
 
 CONNECTION_PARAM_NAMES = ("conn", "connection", "db", "database", "cursor", "cur")
 
@@ -49,6 +59,14 @@ def benign_value_for(param_name: str) -> str | int:
     the more specific hint is the right answer.
     """
     low = param_name.lower()
+    words = [w for w in re.split(r"[^a-z0-9]+", low) if w]
+    if words and words[-1] not in NUMERIC_HINTS:
+        if any(w in EMAIL_HINTS for w in words):
+            return "alice@example.com"
+        if any(w in URL_HINTS for w in words):
+            return "https://example.com/alice"
+        if any(w in HOST_HINTS for w in words):
+            return "example.com"
     if any(h in low for h in COLUMN_HINTS):
         return "name"
     if any(h in low for h in DATE_HINTS):
@@ -257,11 +275,23 @@ _install_missing_module_stubs()
 NUMERIC_HINTS = {NUMERIC_HINTS!r}
 DATE_HINTS = {DATE_HINTS!r}
 COLUMN_HINTS = {COLUMN_HINTS!r}
+EMAIL_HINTS = {EMAIL_HINTS!r}
+URL_HINTS = {URL_HINTS!r}
+HOST_HINTS = {HOST_HINTS!r}
 CONNECTION_PARAM_NAMES = {CONNECTION_PARAM_NAMES!r}
 
 
 def benign_value_for(param_name):
+    import re
     low = param_name.lower()
+    words = [w for w in re.split(r"[^a-z0-9]+", low) if w]
+    if words and words[-1] not in NUMERIC_HINTS:
+        if any(w in EMAIL_HINTS for w in words):
+            return "alice@example.com"
+        if any(w in URL_HINTS for w in words):
+            return "https://example.com/alice"
+        if any(w in HOST_HINTS for w in words):
+            return "example.com"
     if any(h in low for h in COLUMN_HINTS):
         return "name"
     if any(h in low for h in DATE_HINTS):

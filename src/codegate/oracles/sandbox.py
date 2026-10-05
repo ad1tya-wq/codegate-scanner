@@ -1,10 +1,22 @@
 from __future__ import annotations
 from dataclasses import dataclass
+import os
 import platform
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+# Wall-clock budgets for one detonation, tried in order: a run that times
+# out is retried once with the longer budget before the oracle abstains.
+# 15 s rather than the original 5 s because each harness makes one call per
+# parameter inside a single process. The retry exists because a timeout is
+# a property of the machine's load, not of the code: one real sample
+# (CWE-78-042, a module-level `npm install`) takes ~11 s and abstained or
+# not between two labelling runs of the same corpus. Only samples that
+# time out pay for the retry.
+SANDBOX_TIMEOUTS_S = (15.0, 60.0)
 
 
 @dataclass(frozen=True)
@@ -62,7 +74,11 @@ def run_sandboxed(code: str, harness: str, timeout_s: float = 5.0) -> SandboxRes
     full_source = harness + "\n" + code
     with tempfile.TemporaryDirectory() as tmp:
         script_path = Path(tmp) / "snippet.py"
-        script_path.write_text(full_source)
+        # UTF-8 explicitly: Python reads source files as UTF-8, but
+        # write_text() defaults to the platform encoding (cp1252 on
+        # Windows), so generated code with any non-ASCII character failed
+        # to parse there -- or raised before the sandbox even started.
+        script_path.write_text(full_source, encoding="utf-8")
 
         # A new process group (Windows) / session (POSIX) so a timeout can
         # kill the whole tree, not just this direct child -- see
@@ -73,10 +89,15 @@ def run_sandboxed(code: str, harness: str, timeout_s: float = 5.0) -> SandboxRes
             if platform.system() == "Windows"
             else {"start_new_session": True}
         )
+        # The child's stdout is a pipe, which Python also encodes in the
+        # platform encoding unless told otherwise; printing a non-ASCII
+        # character then crashed it on Windows. UTF-8 on both ends.
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
         proc = subprocess.Popen(
             [sys.executable, str(script_path)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-            cwd=tmp, **creation_kwargs,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            encoding="utf-8", errors="replace",
+            cwd=tmp, env=env, **creation_kwargs,
         )
         try:
             stdout, stderr = proc.communicate(timeout=timeout_s)

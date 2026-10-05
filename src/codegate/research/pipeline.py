@@ -10,6 +10,7 @@ from codegate.config import CodeGateConfig
 from codegate.research.corpus.prompts import Prompt
 from codegate.research.generation.backends import Backend
 from codegate.research.generation.harness import run_generation
+from codegate.oracles.ast_utils import parses
 from codegate.oracles.sqli_oracle import check_sqli
 from codegate.oracles.cmdi_oracle import check_cmdi
 from codegate.oracles.creds_oracle import check_creds
@@ -46,7 +47,7 @@ LABEL_ABSTAIN = -1
 # codellama), square-bracket tags ([PYTHON] ... [/PYTHON], codellama), and
 # HTML-style tags (<pre> ... </pre>, codellama). Without extraction,
 # ast.parse() on the raw text raises SyntaxError on the prose,
-# _first_function_name returns None, and the dynamic oracles fall back to
+# no function name can be read, and the dynamic oracles fall back to
 # SimulatedBackend's four template names -- which real models essentially
 # never use -- so every dynamic-oracle CWE (89, 78) abstains almost
 # entirely on exactly the flavors (vulnerable, near_miss) that need
@@ -82,11 +83,48 @@ def extract_code(raw: str) -> str:
     that emits no usable code at all (also observed: a genuine non-answer
     that should legitimately abstain downstream, not be forced into a
     false extraction).
+
+    When the result does not parse, its dedented form, or an extraction
+    from the dedented answer, is used instead if that parses: codellama
+    sometimes indents its whole answer, fences included, by two spaces
+    (18 neutral samples in the shipped corpus).
     """
-    for pattern in _DELIMITER_PATTERNS:
-        for block in pattern.findall(raw):
-            if _DEF_RE.search(block):
+    code = _extract_once(raw)
+    if parses(code):
+        return code
+    for candidate in (textwrap.dedent(code), _extract_once(textwrap.dedent(raw))):
+        if parses(candidate):
+            return candidate
+    return code
+
+
+_DEF_NAME_RE = re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\(", re.MULTILINE)
+
+
+def _extract_once(raw: str) -> str:
+    # The first def-bearing block is the implementation. Step-by-step
+    # answers (codellama, real corpus) put the bare signature in its own
+    # block before the full code; that fragment does not parse, and taking
+    # it handed the oracle a function with no body, which read as SAFE. So
+    # a later block that parses replaces it -- but only when it defines
+    # every function the first block does, i.e. it is the same code in
+    # full. A later block defining something else (a usage example's
+    # `main()`) is unrelated code: taking it labelled an injectable
+    # implementation SAFE. Then the first block is returned and the
+    # oracle abstains.
+    def_blocks = [block
+                  for pattern in _DELIMITER_PATTERNS
+                  for block in pattern.findall(raw)
+                  if _DEF_RE.search(block)]
+    if def_blocks:
+        first = def_blocks[0]
+        if parses(first):
+            return first
+        wanted = set(_DEF_NAME_RE.findall(first))
+        for block in def_blocks[1:]:
+            if parses(block) and wanted <= set(_DEF_NAME_RE.findall(block)):
                 return block
+        return first
 
     # Two codellama shapes seen in the pilot corpus, tried only when no
     # well-formed delimiter held a def: code wrapped in an HTML <details>
@@ -103,16 +141,72 @@ def extract_code(raw: str) -> str:
     return raw
 
 
-def _first_function_name(code: str) -> str | None:
+def _function_names(code: str) -> list[str]:
+    """
+    The snippet's entry points, in source order: module-level functions
+    that no other function in the snippet calls or references, or [] when
+    it doesn't parse.
+
+    Module-level only: the harness calls the function by its global name,
+    so a method (`Scanner.run`) cannot be called -- and judging its name
+    resolved `run` to an imported `subprocess.run`.
+
+    Entry points only: a helper such as `_run(cmd)` takes a whole command
+    line by design and is injectable on its own, but the snippet's input
+    reaches it only through the function the prompt asked for, which is
+    judged with the helper running inside it. When every function is used
+    by another (mutual recursion), all of them are returned.
+    """
     import ast
+    from codegate.oracles.ast_utils import module_level_functions
     try:
         tree = ast.parse(code)
-    except SyntaxError:
-        return None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef):
-            return node.name
-    return None
+    except (SyntaxError, ValueError):
+        return []
+    defs = module_level_functions(tree)
+    names: list[str] = []
+    for node in defs:
+        if node.name not in names:
+            names.append(node.name)
+
+    def takes_input(node) -> bool:
+        a = node.args
+        return bool(a.posonlyargs or a.args or a.vararg or a.kwonlyargs or a.kwarg)
+
+    # A function that takes no arguments (`main()` calling the real
+    # function with literals) cannot receive input, so it is a demo
+    # driver like module-level example code: what it calls stays an
+    # entry point, and it is one only when nothing else is.
+    used: set[str] = set()
+    for node in defs:
+        if not takes_input(node):
+            continue
+        for sub in ast.walk(node):
+            if (isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load)
+                    and sub.id != node.name and sub.id in names):
+                used.add(sub.id)
+    with_input = {n.name for n in defs if takes_input(n)}
+    entry_points = [n for n in names if n not in used and n in with_input]
+    return entry_points or [n for n in names if n not in used] or names
+
+
+def _judge_every_function(check, code: str, names: list[str]) -> bool | None:
+    """
+    The snippet's verdict from a dynamic oracle: True if any entry point is
+    injectable, False if none is and at least one was judged safe, None if
+    none could be judged. Judging only the first function let a validation
+    helper defined first (`is_valid_hostname` before `scan_host`) stand in
+    for the function the prompt asked for; `names` comes from
+    _function_names, so helpers are judged through their callers.
+    """
+    saw_safe = False
+    for fn in names:
+        v = check(code, function_name=fn)
+        if v is True:
+            return True
+        if v is False:
+            saw_safe = True
+    return False if saw_safe else None
 
 
 def label_row(row: pd.Series) -> dict:
@@ -126,26 +220,16 @@ def label_row(row: pd.Series) -> dict:
     code = row["code"]
     cwe = row["cwe"]
 
-    candidate_names = list(_SIM_CANDIDATE_FN_NAMES)
-    first_fn = _first_function_name(code)
-    if first_fn and first_fn not in candidate_names:
-        candidate_names = [first_fn] + candidate_names
+    candidate_names = _function_names(code)
+    candidate_names += [n for n in _SIM_CANDIDATE_FN_NAMES if n not in candidate_names]
 
     dynamic_verdict = None
     static_verdict = None
 
     if cwe == "CWE-89":
-        for fn in candidate_names:
-            v = check_sqli(code, function_name=fn)
-            if v is not None:
-                dynamic_verdict = v
-                break
+        dynamic_verdict = _judge_every_function(check_sqli, code, candidate_names)
     elif cwe == "CWE-78":
-        for fn in candidate_names:
-            v = check_cmdi(code, function_name=fn)
-            if v is not None:
-                dynamic_verdict = v
-                break
+        dynamic_verdict = _judge_every_function(check_cmdi, code, candidate_names)
     elif cwe == "CWE-798":
         static_verdict = check_creds(code)
 

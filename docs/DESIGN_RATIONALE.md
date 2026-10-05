@@ -276,8 +276,8 @@ cluster-aware certificate were on this list and are done
 
 1. **More task groups, not more samples per task.** The certificate counts
    each task group once, so tasks are what buy coverage. With 66
-   vulnerable calibration groups, α = 0.05 certifies only 29% coverage.
-2. **Better harness values for path- and directory-validated code.** 32%
+   vulnerable calibration groups, α = 0.05 certifies only 32% coverage.
+2. **Better harness values for path- and directory-validated code.** 27%
    of safe command-execution samples still can't be judged, which loses
    exactly the hard negatives the ranker learns most from.
 3. **Re-measure the live verifier on the real model**, and record real
@@ -321,17 +321,17 @@ proves the framework *notices* when it doesn't hold, rather than
 silently reporting a false guarantee. A "normal" threshold has no
 mechanism to detect this at all. On the real corpus, calibrating on three
 models and testing on the fourth's unseen data, three of four stay within
-α = 0.10 (2.9%, 3.7%, 7.0%) and codegemma comes in at 11.0% (10 of 91, not
+α = 0.10 (4.2%, 3.5%, 6.4%) and codegemma comes in at 10.5% (10 of 95, not
 significant).
 
 The honest limit of this claim is the exchangeability assumption itself,
 and this project hit it. Four models answering the same task give
 correlated samples, and the standard per-sample test was optimistic for
-them: on held-out data its α = 0.10 threshold missed 13.1%. The shipped
+them: on held-out data its α = 0.10 threshold missed 13.4%. The shipped
 certificate counts each task group once instead (Hoeffding–Bentkus over
-per-group miss fractions). It stays within target on held-out data (7.6%
+per-group miss fractions). It stays within target on held-out data (9.3%
 per task) and kept its promise in every simulated setting, where the
-per-sample test broke it 8.5–12% of the time.
+per-sample test broke it 7–18% of the time once samples correlate.
 
 ### Claim: the triage design is what makes LLM-based verification economically viable, not just accurate
 
@@ -364,7 +364,7 @@ not a claim about a 10,000-function monorepo. What *does* generalize is
 the mechanism: the fraction requiring an LLM call is exactly the
 fraction the certificate can't clear, and that fraction is a property of
 the ranker's quality and `alpha`, not of codebase size. On the real
-corpus's calibration data the shipped threshold auto-approves 49% of
+corpus's calibration data the shipped threshold auto-approves 50% of
 functions, so a larger codebase like it would see roughly half escalated.
 That is the actual cost claim: bounded LLM spend as a function of
 `alpha`, not of lines of code.

@@ -157,9 +157,9 @@ will later see.
 
 CodeGate's certificate is **cluster-aware**. Several models answer each
 task, so samples from one task group are correlated (measured intra-group
-correlation 0.57 on the shipped corpus). The standard test treats every
+correlation 0.66 on the shipped corpus). The standard test treats every
 sample as independent and becomes optimistic. In simulation it certified
-thresholds that really missed more than α in 8.5–12% of runs, against the
+thresholds that really missed more than α in 7–18% of runs, against the
 5% allowed. So CodeGate counts each task group once. A group's loss is the
 fraction of its vulnerable samples above `t`, the risk is the mean over
 groups, and each threshold is tested with the Hoeffding–Bentkus p-value
@@ -170,7 +170,7 @@ setting. Section 8.9 tells how this was found.
 How much data is needed: with zero misses (`k = 0`), certifying requires
 `(1 − α)^n ≤ δ`, so at α = δ = 0.05 the minimum is **59 vulnerable
 calibration samples**. The tolerance for misses grows slowly: n = 100
-tolerates k ≤ 1, n = 150 tolerates k ≤ 2, n = 206 tolerates k ≤ 4.
+tolerates k ≤ 1, n = 150 tolerates k ≤ 2, n = 218 tolerates k ≤ 5.
 
 ### 2.3 Related work, and what is new here
 
@@ -232,7 +232,7 @@ Repository layout:
 | `scripts/` | Corpus generation, relabelling, training from a shipped corpus, evaluation, corpus repair |
 | `data/prompts/` | The prompt bank (YAML) |
 | `data/model/` | The shipped model and certificate |
-| `tests/` | 442 automated tests |
+| `tests/` | 515 automated tests |
 | `examples/vulnerable_app/` | Demo target with known ground truth |
 
 ---
@@ -596,8 +596,8 @@ codegate calibrate [--real] [--out-dir DIR]     # rebuild model + certificate (d
 
 - **Test-driven fixes.** Every defect fix in the oracle work started as a
   failing test reproducing the real sample. The test was then made to pass,
-  and the full suite rerun. The suite has **442 tests**. The largest file,
-  `tests/test_oracle_ground_truth.py` (158 tests), pins hand-verified labels
+  and the full suite rerun. The suite has **515 tests**. The largest file,
+  `tests/test_oracle_ground_truth.py` (220 tests), pins hand-verified labels
   for every defect found on real data. Most detection tests have a
   deliberately safe twin, so a loosened detector shows up as a failure.
 - **Guardrail: tests assert structure, never model values.** Retraining
@@ -740,8 +740,8 @@ module.
 The first real certificate passed its own test, but on held-out data its
 α = 0.10 threshold auto-approved 13.1% of vulnerable code. The cause was
 structural, not bad luck. Four models answer each task, so the 206
-vulnerable calibration samples are 66 correlated clusters (intra-group
-correlation 0.57). The per-sample binomial test counted them as 206
+vulnerable calibration samples of the corpus as labelled then were 66
+correlated clusters (intra-group correlation 0.57). The per-sample binomial test counted them as 206
 independent draws. A seeded simulation confirmed it: under that
 correlation the test certified thresholds that really missed more than α
 in 8.5–12% of runs, against the 5% it promises. The cluster-aware
@@ -749,6 +749,24 @@ certificate (section 2.2) held in every setting, and on the real data it
 stays within target. While building it, the generator-shift experiment
 turned out to calibrate and measure on the ranker's own training samples;
 it now uses the calibration split and unseen data only.
+
+### 8.10 Labels that depended on the labelling machine
+
+A label-by-label audit on 2026-10-05 read every suspicious label. The SQL
+labels were all right. The command-injection oracle was not: it ran the
+generated command for real and looked for a file its payload wrote, so it
+judged injection by the labelling machine's own shell. The corpus was
+labelled on Windows, where `cmd.exe` treats `&` inside double quotes as
+text and does not treat single quotes as quoting, so plainly injectable
+code (`f'cp "{src}" "{dest}"'`) was labelled SAFE. The oracle now runs the
+function with a recorder in place of every process-starting call and
+reads the recorded command line with POSIX shell grammar; nothing is
+executed, and the verdict is the same on every platform. Extraction,
+credential detection and the choice of which function to judge were fixed
+in the same pass. Against the previous labels 108 of 2,040 changed, each
+explained by cause, and no sample from a safe prompt became vulnerable
+(`docs/ENGINEERING_LOG.md` §14–15). The shipped model is trained on the
+corrected labels.
 
 ---
 
@@ -761,36 +779,35 @@ it now uses the calibration split and unseen data only.
 | Generated (full run) | 2,156 of 2,160 |
 | Repaired (stale answers removed, splits corrected) | 2,078 |
 | **Shipped corpus** (prompts answered by all 4 models) | **2,040 = 510 prompts × 4** |
-| Abstentions | 135 (6.6%) |
-| Vulnerable among decided | 26.8% |
+| Abstentions | 114 (5.6%) |
+| Vulnerable among decided | 28.3% |
 | Splits (samples) | train 820 / calib 812 / test 408 |
 
 Abstention on the same pipeline was 28.3% in September and 19.2% after the
-first repairs, and is 6.5–6.6% now.
+first repairs, 6.6% before the label audit, and is 5.6% now.
 
 ### 9.2 The certificate (shipped)
 
-| α | t̂ | coverage | vulnerable calibration samples |
-|---|---|---|---|
-Cluster-aware: 206 vulnerable calibration samples in 66 task groups.
+Cluster-aware: 218 vulnerable calibration samples in 66 task groups.
 
 | α | t̂ | coverage | vulnerable calibration samples |
 |---|---|---|---|
-| 0.05 | 0.9091 | 29.2% | 206 (66 groups) |
-| **0.10 (shipped)** | **0.8259** | **48.8%** | 206 (66 groups) |
-| 0.20 | 0.7634 | 60.3% | 206 (66 groups) |
-| 0.30 | 0.7440 | 63.7% | 206 (66 groups) |
+| 0.05 | 0.8916 | 31.5% | 218 (66 groups) |
+| **0.10 (shipped)** | **0.8023** | **50.0%** | 218 (66 groups) |
+| 0.20 | 0.7437 | 60.5% | 218 (66 groups) |
+| 0.30 | 0.7196 | 65.0% | 218 (66 groups) |
 
 For comparison, the per-sample binomial certificate it replaced gave
-t̂ = 0.7763 (56.4% coverage) at α = 0.10.
+t̂ = 0.7548 (58.5% coverage) at α = 0.10, and on held-out data that
+threshold auto-approves 13.4% of vulnerable code.
 
 ### 9.3 Generalization
 
 | Measure | Result |
 |---|---|
-| Ranker ROC-AUC, held-out test split | **0.889** (0.925 including training data) |
-| Held-out test split, share of vulnerable code auto-approved | **7.6% per task group, 9.3% per sample** vs α = 0.10 (95% cluster bootstrap 0.8–16.7%) |
-| Generator shift (calibrate on 3, test the 4th on unseen data) | 3 of 4 within α = 0.10: 2.9% (codellama), 3.7% (deepseek), 7.0% (qwen); codegemma 11.0% (10 of 91, P = 0.43) |
+| Ranker ROC-AUC, held-out test split | **0.903** (0.935 including training data) |
+| Held-out test split, share of vulnerable code auto-approved | **9.3% per task group** vs α = 0.10 (95% cluster bootstrap 1.8–19.2%); 10.7% pooled per sample (12 of 112), which a true 10% rate produces 45% of the time |
+| Generator shift (calibrate on 3, test the 4th on unseen data) | 3 of 4 within α = 0.10: 4.2% (codellama), 3.5% (deepseek), 6.4% (qwen); codegemma 10.5% (10 of 95, P = 0.48) |
 | Demo app, static + gate only | precision 0.27, recall 1.00 (4 of 14 auto-approved) |
 | Demo app, with verifier | not yet re-measured on the real model |
 
@@ -799,14 +816,14 @@ t̂ = 0.7763 (56.4% coverage) at α = 0.10.
 ## 10 · Limitations and open issues
 
 **Coverage.** The cluster-aware certificate is stricter: at α = 0.05 it
-certifies only 29% coverage, so the shipped operating point is α = 0.10.
+certifies only 32% coverage, so the shipped operating point is α = 0.10.
 It assumes task groups are exchangeable with future tasks; the tasks are
 hand-written, so that is a judgement about how representative the prompt
 bank is, not something the statistics can check.
 
 **Other open items:**
 
-- 32% of safe command-execution samples still can't be judged: their
+- 27% of safe command-execution samples still can't be judged: their
   validation demands real directories or paths under a base directory that
   no generated value satisfies. These samples are excluded, not mislabelled,
   but they are valuable hard negatives.
@@ -827,15 +844,9 @@ bank is, not something the statistics can check.
 3. Better harness values for path- and directory-validated code.
 4. A code-embedding ranker for more coverage at the same guarantee.
 5. More CWEs, each only once it has a reliable automatic ground truth.
-6. **Ship the audited labels.** A label-by-label audit on 2026-10-05 found
-   34 vulnerable samples labelled SAFE or not judged, mostly
-   command-injection code judged by the labelling machine's own shell
-   instead of POSIX shell rules. The corrected oracles are on branch
-   `wip/label-audit-2026-10-05`; measured there, every audited error is
-   fixed with no new false alarms on safe prompts, held-out ROC-AUC rises
-   from 0.889 to 0.902, and the certificate stays within bound on held-out
-   data (9.3% per task against 10%). Details:
-   `docs/ENGINEERING_LOG.md` §14.
+6. Re-word prompt CWE-798-027 to pin `private_key`, not the identifier
+   `private_key_id`, before the next generation run (`ENGINEERING_LOG.md`
+   §14.3).
 
 ---
 
@@ -843,7 +854,7 @@ bank is, not something the statistics can check.
 
 ```
 pip install -e ".[dev,research]"
-python -m pytest tests/ -q                                  # 442 tests
+python -m pytest tests/ -q                                  # 515 tests
 
 # label a corpus with the current oracles
 python scripts/relabel.py --generations <generations.parquet> --out-dir <dir>

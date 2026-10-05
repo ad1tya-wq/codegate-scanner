@@ -34,9 +34,10 @@ Four status labels are used throughout:
 | 9 | Demo assets (`examples/vulnerable_app/`) | SOLID | — | 177 passed |
 | — | Evaluation & metrics (`research/eval/metrics.py`, `scripts/run_eval.py`) | SOLID (mechanism) / PROVISIONAL (ranker-quality numbers, per §6) | — | 187 passed |
 | 8 | Retrain on real corpus (join point) | SOLID — first attempt (516 samples, §11) certified nothing; after the oracle repairs and the 2,160-sample run, certified and shipped as `real-2040-sym` at α = 0.10 (§12) | `13d8b83`–`e7723fc` | 416 passed |
+| — | Label audit shipped: POSIX-grammar command-injection oracle, review fixes, retrain on the audited labels (§14–15) | SOLID | `ef9e3c7`–(this branch) | 515 passed |
 
-Current test suite: **442 passed**, 0 failed, ~10 min wall clock (2026-10-04)
-(`python -m pytest tests/ -q`, verified this session).
+Current test suite: **515 passed**, 0 failed (2026-10-05, Python 3.13, semgrep
+installed; `python -m pytest tests/ -q`).
 
 ## 3 · Per-phase entries
 
@@ -892,23 +893,23 @@ accounting machinery still gets built and unit-tested now — only the
 
 ## 7 · Test inventory
 
-442 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
-counts per file regenerated 2026-10-05).
+515 tests collected, all passing (`python -m pytest tests/ --collect-only -q`,
+counts per file regenerated 2026-10-05, after the label audit).
 
 | File | Tests | Protects |
 |---|---|---|
-| `test_oracle_ground_truth.py` | 158 | Hand-verified labels for all three oracles, each pinning a defect found on real corpora: arity and statement-type cases for SQLi; Postgres idiom; multi-argument, allowlist, suffix-check, `int()`-cast, post-spawn-parse and module-level-demo-call cases for cmdi; every CWE-798 secret shape, each with an environment-sourced negative twin |
-| `test_oracles.py` | 24 | Core oracle contracts: `function_exists`, sandbox execution/timeout/exit-code capture, detection on fixtures, consensus rule v2 (including refusing to coerce a missing verdict), semgrep hit/clear on fixtures |
+| `test_oracle_ground_truth.py` | 220 | Hand-verified labels for all three oracles, each pinning a defect found on real corpora: arity and statement-type cases for SQLi; Postgres idiom; multi-argument, allowlist, suffix-check, `int()`-cast, post-spawn-parse and module-level-demo-call cases for cmdi; POSIX shell grammar (quoting contexts, `#`, `$( )`, wrappers, exec/spawn argv, asyncio), existence checks both ways, input-must-reach-a-process, and a 20-idiom false-alarm battery (§15); every CWE-798 secret shape, each with an environment-sourced negative twin, and positional tokens |
+| `test_oracles.py` | 25 | Core oracle contracts: `function_exists`, sandbox execution/timeout/exit-code capture, detection on fixtures, consensus rule v2 (including refusing to coerce a missing verdict), semgrep hit/clear on fixtures |
 | `test_dbapi_recorder.py` | 21 | Recording DB-API connection: paramstyle translation, statement capture through cursors and shortcuts, splice-vs-bound detection |
 | `test_corpus.py` | 17 | Prompt bank loading and shape: 60 groups per CWE, 24/24/12 splits, pinned signatures and arity spread, pinned CWE-798 literals, pilot selection |
 | `test_verifier.py` | 17 | JSON verdict parsing, degradation without a backend or on backend errors, caching, `Finding` mapping, `build_verifier_backend` |
-| `test_oracle_robustness.py` | 15 | The SQLi table-name abstention-defect class, plus the sink-shortcut correctness tests |
+| `test_oracle_robustness.py` | 18 | The SQLi table-name abstention-defect class, the sink-shortcut correctness tests, and which functions `label_row` judges (entry points only, never methods) |
 | `test_scan_pipeline.py` | 15 | `Finding` validation, semgrep mapping, the no-execution invariant, gate partitioning, uncertified-threshold escalation, verifier paths, cache reuse, token accounting, `calibration` pass-through |
 | `test_artifacts.py` | 15 | Model/calibration round trips, missing-file errors, uncertified `t_hat`, version guard, the persisted frontier, `at_alpha` (certified, uncertified and never-computed alphas), pre-frontier files still loading |
 | `test_cli.py` | 13 | `info`/`calibrate`/`scan` via `CliRunner`, including `--alpha` with a certified alpha and refusing an uncertified one |
 | `test_eval_metrics.py` | 15 | Oracle accuracy on fixtures, label distribution, score frames, separation metrics, held-out split filtering (and refusing a split filter without split data), `scan_ground_truth_eval` |
-| `test_oracle_invocation.py` | 13 | Benign-value heuristics, the self-contained harness prelude, allowlist harvesting |
-| `test_pipeline_extract_code.py` | 11 | Code extraction from fenced, tagged, `<pre>`, `<details>` and unopened-fence completions |
+| `test_oracle_invocation.py` | 16 | Benign-value heuristics, the self-contained harness prelude, allowlist harvesting |
+| `test_pipeline_extract_code.py` | 15 | Code extraction from fenced, tagged, `<pre>`, `<details>` and unopened-fence completions; step-by-step answers, whole-answer indentation, and never trading the implementation for an unrelated example |
 | `test_report_pdf.py` | 12 | Highlighting, excerpts, escaping regressions, a real PDF's signature and size, edge cases |
 | `test_generation.py` | 10 | `SimulatedBackend` shape/determinism, `stable_seed`, backend construction |
 | `test_generation_resume.py` | 9 | Checkpoint write/read, resume, partial failure, and (2026-10-04) regenerating reworded or unfingerprinted records while taking the split from the current prompt |
@@ -1962,3 +1963,123 @@ scores):
   tasks").
 
 **Shipped today:** the guarantee wording above (PDF report and docs).
+
+## 15 · The audited labels ship (2026-10-05)
+
+Plan and progress reports: `docs/superpowers/plans/2026-10-05-label-audit-completion.md`.
+
+**Review closed.** The eleven open findings of the code review in §14
+(each pinned by a failing test on the branch) were fixed without changing
+any test:
+
+| # | Where | Fix |
+|---|---|---|
+| 1 | `pipeline._extract_once` | a later block replaces an unparseable first block only if it defines every function the first one does, so an unrelated usage example never wins |
+| 2 | `pipeline._function_names` | only entry points are judged: module-level functions that no input-taking function calls or references; helpers run inside their callers |
+| 3 | `pipeline._function_names`, `ast_utils.function_exists` | module-level functions only, `async def` included; a method is never resolved as a global |
+| 4 | `cmdi_oracle.has_shell_sink` | also true for process functions imported by name or reached through a module alias |
+| 5 | `cmdi_oracle` harness | every payload is tried with its paths reported missing and then existing, so `if exists(p): raise` guards are judged too |
+| 6 | `cmdi_oracle.build_payloads` | adds `$( )`, backticks, a no-space payload, and `\|`, `&&` and newline separators |
+| 7 | `ShellRecorder.reached`, harness `_input_reached` | SAFE needs a recorded call that carries the input; the control run checks this by changing the argument and re-recording, so a `--version` preflight is not evidence |
+| 8 | `shell_recorder.shell_command_line` | unwraps `env`, `timeout`, `nice`, `sudo` and similar; only shell options before the first operand count |
+| 9 | `ShellRecorder.install` | records `asyncio.subprocess.*` and `BaseEventLoop.subprocess_shell/exec` |
+| 10 | `shell_recorder.marker_runs_as_command` | a small POSIX tokenizer replaces `shlex`: `#` starts a comment only at a word start, and command starts inside `$( )`, backticks and `<( )` count |
+| 11 | `ShellRecorder.install` | per-function argv decoding for `os.exec*`, `os.spawn*`, `os.posix_spawn*`; the program path replaces `argv[0]` |
+
+A false-alarm battery was added (`test_cmdi_oracle_safe_constructs_never_fire`):
+twenty safe shell idioms (`shlex.quote`, `shlex.join`, argv lists,
+`sh -c` with positional parameters, allowlists, `int()` casts, wrappers,
+`exec`/`spawn` argv, heredocs, fully escaped double quotes) are never
+labelled injectable, and `shlex.quote` inside double quotes, which is
+broken, is.
+
+**Tests.** 515 pass on Python 3.13 with semgrep installed, including the
+slow pipeline and calibration tests (`main` had 442).
+
+**Relabel.** All four corpora, with the oracles above (run v10):
+
+```
+python scripts/relabel.py --generations data/runs/<corpus>/generations.parquet --out-dir data/runs/<corpus>_labeled_v10
+```
+
+Against v9 (the branch before the review fixes): `real_sym` and
+`real_2160` change 6 labels each, `real_540` and `pilot` none.
+`9f0de045-0` ABSTAIN → VULN (f-string inside `sqlalchemy.text()`);
+`53585bcb-0` ABSTAIN → SAFE (argv list); four near-miss `list_processes`
+samples SAFE → ABSTAIN, because they run `ps aux` and filter in Python, so
+the input never reaches a process (finding 7, by design).
+
+Against the labels the shipped model was trained on, 108 of 2,040 change;
+abstention 6.6% → 5.6%; vulnerable share of decided 26.8% → 28.3%. **No
+sample from a non-vulnerable prompt became VULN, on any corpus.** Every
+change, by cause (each read):
+
+| CWE / flavor | Change | n | Cause |
+|---|---|---|---|
+| 78 / vulnerable | SAFE → VULN | 21 | interpolated shell string the Windows-run oracle missed |
+| 78 / vulnerable | SAFE → VULN | 4 | step-by-step answers: extraction now takes the full code, not the bare signature |
+| 78 / vulnerable | ABSTAIN → VULN | 5 | the same shell-string shapes, previously unjudged |
+| 78 / vulnerable | VULN → SAFE | 1 | `1bfb8799-0`: `cmd.split()` passed as a list with `shell=True` (the deliberate POSIX definition, §14.3 of the handoff) |
+| 78 / near_miss | ABSTAIN → SAFE | 30 | argv lists with `shell=False` behind regex, allowlist or existence checks, now reached |
+| 78 / near_miss | SAFE → ABSTAIN | 18 | the input never reaches a process call |
+| 78 / neutral | SAFE → ABSTAIN | 5 | extracted code does not parse |
+| 89 / neutral | SAFE → ABSTAIN | 6 | extracted code does not parse |
+| 89 / near_miss | ABSTAIN → SAFE | 7 | parameterized queries behind e-mail validation, reached with format-aware filler |
+| 89 / vulnerable | ABSTAIN → VULN | 1 | `9f0de045-0` |
+| 798 / vulnerable | SAFE → VULN | 3 | key passed positionally into a client constructor |
+| 798 / various | ABSTAIN → SAFE or VULN | 7 | extraction now finds the full code |
+
+**Retrain and compare.**
+
+```
+python scripts/train_from_pregenerated.py data/runs/real_sym/generations.parquet --out-dir data/runs/real_sym_v10 --corpus-version real-2040-sym
+python scripts/run_eval.py --model-dir data/runs/real_sym_v10
+```
+
+| | previous model | **v10 (promoted)** |
+|---|---|---|
+| abstention / vulnerable of decided | 6.6% / 26.8% | **5.6% / 28.3%** |
+| vulnerable calibration samples / task groups | 206 / 66 | **218 / 66** |
+| ICC(1), design effect, effective n | 0.57, 2.2, ≈ 94 | **0.66, 2.5, ≈ 87** |
+| t̂ / coverage at α = 0.10 | 0.8259 / 48.8% | **0.8023 / 50.0%** |
+| t̂ / coverage at α = 0.05 | 0.9091 / 29.2% | **0.8916 / 31.5%** |
+| per-sample certificate at α = 0.10 (for comparison) | 0.7808 / 57.1%, held-out 13.1% | 0.7548 / 58.5%, held-out 13.4% |
+| held-out ROC-AUC (full corpus) | 0.889 (0.925) | **0.903 (0.935)** |
+| held-out miss rate per task (certified quantity) | 7.6% (0.8–16.7%) | **9.3% (1.8–19.2%)** |
+| held-out miss rate per sample | 9.3% (10/107) | 10.7% (12/112; P(≥ 12 \| 10%) = 0.45) |
+| generator shift, codellama / deepseek / qwen | 2.9% / 3.7% / 7.0% | 4.2% / 3.5% / 6.4% |
+| generator shift, codegemma | 11.0% (10/91, P = 0.43) | 10.5% (10/95, P = 0.48) |
+| demo app, static + gate | P 0.27, R 1.00, 10 of 14 escalated | unchanged |
+
+The held-out miss rate rose. Scored against the same corrected test
+labels, the previous model also misses 7.6% per task (AUC 0.901): the
+rise comes from v10's lower certified threshold, which its larger, correct
+calibration evidence licenses, not from the labels. Both are certified and
+both are within the bound on held-out data. As in §13.1, the model with the
+more correct labels is promoted; keeping the other on its test-split
+number would be selecting a model on the test set. The per-sample rate is
+above 10% and is not the certified quantity.
+
+**Validity simulation, rerun** with v10's 66 calibration group sizes
+(400 replications per setting, α = 0.10, δ = 0.05, seed 20261005): share
+of runs certifying a threshold whose true miss rate exceeds α (allowed
+0.05):
+
+| within-group correlation | per-sample | cluster-aware |
+|---|---|---|
+| 0.0 | 0.033 | 0.000 |
+| 0.5 | **0.070** | 0.000 |
+| 0.8 | **0.095** | 0.000 |
+| 0.95 | **0.177** | 0.003 |
+
+**Promoted.** `data/model/model.joblib` and `calibration.json` from
+`data/runs/real_sym_v10`, pickled with scikit-learn 1.7.2 (the version of
+the previous artifact). Every document, report and Word version now quotes
+v10's numbers.
+
+**Still open.** Prompt CWE-798-027 should pin `private_key` before the next
+generation run (§14.3 of the handoff). 27% of safe CWE-78 near-miss samples
+still abstain, mostly code that runs its command only for paths under a
+hardcoded base directory.
+
+**Status:** `SOLID`.

@@ -132,7 +132,7 @@ The three oracles:
 | CWE | Oracle | VULN when | SAFE when |
 |---|---|---|---|
 | 89, SQL injection | dynamic: a recording database connection captures the exact SQL string handed to `execute()` | the test input appears in the SQL **text** | SQL ran and the input only ever arrived as a bound parameter |
-| 78, command injection | dynamic: runs the function with a harmless test input in each parameter, built to create a marker file if it reaches a shell | the marker file appears | the function reached a process call and no marker appeared |
+| 78, command injection | dynamic: every process-starting call (`subprocess`, `os.system`, `os.exec*`/`spawn*`, asyncio, `pty`) is replaced by a recorder, so nothing runs; the function is called with a test input in each parameter, and the recorded command line is read with POSIX shell grammar | the input's marker becomes a command of its own (after `;`, `\|`, `&&`, a newline, or inside `$( )` or backticks) | the input reached a process call and never broke out |
 | 798, hardcoded credentials | static: exact rules over the syntax tree (running code cannot tell a real password from a placeholder) | a real-looking secret literal reaches a password variable, credential call, auth header, connection string, or matches a known key shape | otherwise (placeholders and environment variables do not count) |
 
 No entropy test is used for passwords: real passwords are low-entropy,
@@ -141,7 +141,7 @@ which is what makes them bad, not safe.
 *Say this:* "Two of the three labels come from running the code, not from
 pattern matching, and 'could not tell' is never counted as safe."
 
-## 6 · The label audit, and the planned label update
+## 6 · The label audit
 
 On 2026-10-05 every suspicious label was read by hand (three reviewers,
 every disagreement re-checked):
@@ -152,34 +152,43 @@ every disagreement re-checked):
 | 45 command-injection / credentials mismatches | 23 mislabelled, 22 correct |
 | 135 abstentions | mostly safe near-miss code whose input validation the harness's values could not pass |
 
-The main finding: the command-injection oracle runs commands on the
+The main finding: the command-injection oracle ran commands on the
 labelling machine, and the corpus was labelled on Windows, whose shell
 treats quoting differently from a POSIX shell. Some code that is
-injectable on Linux therefore looked safe. In all, 34 vulnerable samples
-are labelled SAFE or not judged in the shipped corpus.
+injectable on Linux therefore looked safe: 34 vulnerable samples were
+labelled SAFE or not judged.
 
-A corrected labeller, which judges commands by POSIX shell rules on every
-platform, is built and measured on branch `wip/label-audit-2026-10-05`.
-It is the next planned update:
+The labeller was rebuilt (section 5): it records the command line instead
+of running it and judges it by POSIX shell rules on every platform. A code
+review of the rebuild found eleven further gaps, all fixed with a test
+each, and a battery of twenty safe shell idioms checks it raises no false
+alarms. The shipped model is trained on the corrected labels:
 
-| | shipped | with the planned labels |
+| | before the audit | **shipped now** |
 |---|---|---|
-| abstention | 6.6% | 5.5% |
-| vulnerable calibration samples | 206 | 218 |
-| t̂ / coverage at α = 0.10 | 0.8259 / 48.8% | 0.8043 / 49.9% |
-| held-out miss rate, per task | 7.6% | 9.3% |
-| held-out ROC-AUC | 0.889 | 0.902 |
-| safe-prompt samples newly labelled VULN, four corpora | — | 0 |
+| abstention | 6.6% | **5.6%** |
+| vulnerable calibration samples | 206 | **218** |
+| t̂ / coverage at α = 0.10 | 0.8259 / 48.8% | **0.8023 / 50.0%** |
+| held-out miss rate, per task | 7.6% | **9.3%** |
+| held-out ROC-AUC | 0.889 | **0.903** |
+| safe-prompt samples newly labelled VULN, four corpora | — | **0** |
 
-*Say this:* "We audited our own labels by hand. The fix is measured: the
-certificate still holds and the scorer gets better. It ships next."
+The held-out miss rate rose, and the reason matters. Scored against the
+same corrected labels, the old model also misses 7.6%: the rise comes from
+the new, slightly looser certified threshold, not from the labels. Keeping
+the old model because its test-split number looks better would mean
+choosing a model on the test set.
+
+*Say this:* "We audited our own labels by hand and fixed the labeller. 108
+of 2,040 labels changed, every one explained, none of them a new false
+alarm. The certificate still holds on data it never saw."
 
 ## 7 · The ranker
 
 `ranker/r2_embedding_lr.py`: a `HashingVectorizer` (512 hashed token
 features of the function's source) feeding a `LogisticRegression`; the
 score is the probability of "safe". Trained on the train split only.
-Held-out ROC-AUC 0.889 (0.925 including its own training data).
+Held-out ROC-AUC 0.903 (0.935 including its own training data).
 
 It is deliberately simple: the scanner scores every function in a target,
 so scoring must be cheap and deterministic, and the certificate does not
@@ -200,11 +209,11 @@ p-value is ≤ δ, certify and continue; **stop at the first failure**.
 Stopping is what keeps testing hundreds of thresholds valid.
 
 **Cluster-aware.** Four models answer each task, so answers to one task
-are correlated: within-task correlation of scores (ICC) is 0.57, so the
-206 vulnerable calibration samples carry about 94 independent samples'
-worth of evidence. Treating them as 206 independent draws makes the test
+are correlated: within-task correlation of scores (ICC) is 0.66, so the
+218 vulnerable calibration samples carry about 87 independent samples'
+worth of evidence. Treating them as 218 independent draws makes the test
 optimistic: in simulation it certified thresholds that really missed more
-than α in 8.5–12% of runs, against the 5% allowed. So each **task group**
+than α in 7–18% of runs, against the 5% allowed. So each **task group**
 counts once: a task's loss is the fraction of its vulnerable samples
 scoring ≥ t, the risk is the average over the 66 tasks, and each threshold
 is tested with the **Hoeffding–Bentkus** p-value for bounded losses (the
@@ -214,8 +223,8 @@ one the LTT paper uses). In the same simulation it never broke its promise.
 
 | threshold | vulnerable calibration samples above | tasks affected | average per-task miss | p-value | verdict |
 |---|---|---|---|---|---|
-| 0.8259 (t̂) | 4 of 206 | 3 of 66 | 2.27% | 0.045 | certified |
-| 0.8250 | 5 | 4 | 2.65% | 0.066 | stop |
+| 0.8023 (t̂) | 5 of 218 | 4 of 66 | 2.27% | 0.045 | certified |
+| 0.8014 | 6 | 5 | 3.03% | 0.090 | stop |
 
 The observed miss rate is only about 2%, yet the certificate promises 10%.
 That gap is the price of having 66 tasks of evidence and wanting 95%
@@ -228,24 +237,27 @@ draw of calibration tasks. A bound on the pooled per-function rate was
 also tried; with these task sizes it certifies nothing at any α.
 
 **Frontier and `--alpha`.** The same calibration certifies a threshold for
-each α in a frontier: α = 0.05 → t̂ 0.9091, 29.2% coverage; 0.10 → 0.8259,
-48.8%; 0.20 → 0.7634, 60.3%; 0.30 → 0.7440, 63.7%. `codegate scan --alpha
+each α in a frontier: α = 0.05 → t̂ 0.8916, 31.5% coverage; 0.10 → 0.8023,
+50.0%; 0.20 → 0.7437, 60.5%; 0.30 → 0.7196, 65.0%. `codegate scan --alpha
 0.05` uses a certified row; an α not on the frontier is refused, and
 thresholds are never interpolated (an interpolated threshold carries no
 certificate).
 
 **Checks on data the certificate never saw.**
 
-- *Held-out split:* 7.6% of vulnerable test code auto-approved per task
-  (95% cluster bootstrap 0.8–16.7%), 9.3% per sample — within 10%.
+- *Held-out split:* 9.3% of vulnerable test code auto-approved per task
+  (95% cluster bootstrap 1.8–19.2%), within the 10% bound. Pooled per
+  sample it is 10.7% (12 of 112), which a true 10% rate produces 45% of
+  the time; the per-sample rate is not what the certificate bounds.
 - *Generator shift:* calibrate on three models, test the fourth on its
-  unseen samples: 2.9% (codellama), 3.7% (deepseek), 7.0% (qwen), and
-  11.0% for codegemma (10 of 91; a true 10% rate gives 10 or more 43% of
+  unseen samples: 4.2% (codellama), 3.5% (deepseek), 6.4% (qwen), and
+  10.5% for codegemma (10 of 95; a true 10% rate gives 10 or more 48% of
   the time). The guarantee does not formally cover a new author, but in
   practice it held for three of four and was within noise for the fourth.
-- *Alternatives tried and rejected:* a betting-style p-value certified a
-  looser threshold that missed 13.1% on held-out data; the old per-sample
-  test's threshold missed 13.1% too.
+- *Alternatives tried and rejected:* when the method was chosen (on the
+  labels before the audit), a betting-style p-value certified a looser
+  threshold that missed 13.1% on held-out data. The old per-sample test's
+  threshold misses 13.4% on the current labels.
 
 *Say this:* "The threshold comes with a 95%-confidence bound of 10% on what
 slips through, each task counts once, and it held on data it never saw."
@@ -278,7 +290,7 @@ verifier).
 
 ## 10 · Engineering practice
 
-- 442 automated tests; every oracle fix began as a failing test built from
+- 515 automated tests; every oracle fix began as a failing test built from
   a real sample, and most detection tests have a deliberately safe twin.
 - Tests assert structure, never model values, so a retrain cannot turn the
   suite red.

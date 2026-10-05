@@ -193,6 +193,20 @@ def check_creds(code: str) -> bool | None:
             if (name and _CREDENTIAL_CALL_PATTERN.search(name) and len(node.args) >= 2
                     and not password_by_keyword and secret_reaches(node.args[-1])):
                 return True
+            # A random-looking token passed positionally is a key whatever
+            # the parameter is called: PagerDuty("R0ut1ng...") and
+            # algoliasearch.Client("app-id", "9f3a2b7c...") pass the secret
+            # with no name to judge it by. A hex-only token is also the shape
+            # of an ID or a digest (ObjectId("507f..."), a sha256 checksum),
+            # so it counts only when passed to a client/auth-like call. On
+            # every sample of four corpora this rule fired only on
+            # vulnerable-flavor CWE-798 code (docs/ENGINEERING_LOG.md §14).
+            for a in node.args:
+                if (isinstance(a, ast.Constant) and isinstance(a.value, str)
+                        and _looks_like_token(a.value)
+                        and (not _HEX_ONLY.match(a.value)
+                             or (name and _CLIENT_CALL_PATTERN.search(name)))):
+                    return True
             # A secret-named key followed by a literal value, in any call:
             # set_config("license_key", "..."), and the hardcoded fallback
             # os.environ.get("JWT_SECRET", "...").
@@ -234,6 +248,24 @@ def check_creds(code: str) -> bool | None:
                 return True
 
     return False
+
+
+_TOKEN_SHAPE = re.compile(r"^[A-Za-z0-9]{16,}$")
+_HEX_ONLY = re.compile(r"^[0-9a-fA-F]+$")
+# Calls that take a key: SDK clients and their factories, auth and session
+# setup. Matched against the call's own name (`Client`, `init`, `connect`).
+_CLIENT_CALL_PATTERN = re.compile(r"client|auth|credential|connect|login|session|init|api",
+                                  re.IGNORECASE)
+
+
+def _looks_like_token(value: str) -> bool:
+    """16+ letters and digits, at least three of each, and not a
+    placeholder: the shape of an API key or token. Words and plain numbers
+    ("YourApplicationID", "1234567890123456") are not."""
+    return (bool(_TOKEN_SHAPE.match(value))
+            and sum(c.isdigit() for c in value) >= 3
+            and sum(c.isalpha() for c in value) >= 3
+            and not _is_placeholder(value))
 
 
 def _is_secret_name(name: object) -> bool:
